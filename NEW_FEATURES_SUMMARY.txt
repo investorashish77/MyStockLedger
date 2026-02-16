@@ -1,0 +1,448 @@
+╔══════════════════════════════════════════════════════════════╗
+║   NEW FEATURES + DEVELOPMENT AGENT - COMPLETE GUIDE         ║
+╚══════════════════════════════════════════════════════════════╝
+
+You identified critical missing features. I've created a complete
+system to help you implement them!
+
+═══════════════════════════════════════════════════════════════
+
+📋 WHAT YOU GET
+===============
+
+1. 📖 ENHANCED FEATURES DESIGN
+   Complete specification for new features:
+   ✓ Edit/Delete transactions
+   ✓ Sell stock workflow
+   ✓ Portfolio analytics with charts
+   ✓ Index comparison (NIFTY50, NIFTY500)
+
+2. 🤖 DEVELOPMENT AGENT
+   AI-powered coding assistant that:
+   ✓ Generates code for you
+   ✓ Shows exactly where to add it
+   ✓ Provides step-by-step guidance
+   ✓ Runs tests automatically
+   ✓ Helps you understand the codebase
+
+3. 📚 COMPLETE DOCUMENTATION
+   User guides for:
+   ✓ Using the development agent
+   ✓ Implementing each feature
+   ✓ Best practices
+   ✓ Troubleshooting
+
+═══════════════════════════════════════════════════════════════
+
+🚀 QUICK START (5 MINUTES)
+===========================
+
+STEP 1: Download Files
+-----------------------
+Download these 3 files:
+1. ENHANCED_FEATURES_DESIGN.md    ← Feature specifications
+2. dev_agent.py                   ← The development agent
+3. AGENT_USER_GUIDE.md            ← How to use the agent
+
+STEP 2: Place in Your Project
+------------------------------
+cd ~/Desktop/equity-tracker  # your project folder
+# Copy the 3 downloaded files here
+
+STEP 3: Run the Agent
+----------------------
+python3 dev_agent.py
+
+You'll see:
+┌────────────────────────────────────────────────┐
+│  🤖 EQUITY TRACKER DEVELOPMENT AGENT           │
+├────────────────────────────────────────────────┤
+│  What would you like to do?                    │
+│                                                 │
+│  1. 🎯 Implement a new feature                 │
+│  2. ✏️  Edit existing code                     │
+│  3. 🧪 Run tests                               │
+│  4. 📖 Explain code                            │
+│  5. 🗺️  View codebase structure               │
+│  6. 📋 View feature roadmap                    │
+│  7. 💡 Get implementation help                 │
+│  8. 🚪 Exit                                    │
+└────────────────────────────────────────────────┘
+
+STEP 4: Implement Your First Feature
+--------------------------------------
+Choose: 1 (Implement a new feature)
+Select: 1 (Edit Transaction)
+Follow the generated instructions!
+
+═══════════════════════════════════════════════════════════════
+
+🎯 FEATURE ROADMAP
+==================
+
+The agent helps you implement these features:
+
+┌──────────────────┬──────────┬────────────┬─────────┐
+│ Feature          │ Priority │ Complexity │ Time    │
+├──────────────────┼──────────┼────────────┼─────────┤
+│ Edit Transaction │ HIGH     │ Low        │ 2-3h    │
+│ Delete Trans.    │ HIGH     │ Low        │ 1-2h    │
+│ Sell Stock UI    │ HIGH     │ Medium     │ 3-4h    │
+│ Analytics View   │ MEDIUM   │ High       │ 6-8h    │
+│ Index Compare    │ MEDIUM   │ High       │ 4-5h    │
+└──────────────────┴──────────┴────────────┴─────────┘
+
+RECOMMENDATION: Start with Edit/Delete (easiest!)
+
+═══════════════════════════════════════════════════════════════
+
+🤖 HOW THE AGENT WORKS
+======================
+
+Example: Implementing "Edit Transaction"
+
+YOU                          AGENT
+───                          ─────
+Run: python3 dev_agent.py
+                             [Shows menu]
+
+Choose: 1 (Implement)
+                             [Shows features]
+
+Select: 1 (Edit Transaction)
+                             [Generates complete code:]
+                             ✓ Database methods
+                             ✓ UI dialog
+                             ✓ Integration code
+                             ✓ Test cases
+                             ✓ Instructions
+
+Copy code to files
+                             "Great! Now run tests"
+
+Run tests
+                             [Runs test suite]
+                             ✅ All tests passed!
+
+Test in app manually
+                             "Feature complete! 🎉"
+
+═══════════════════════════════════════════════════════════════
+
+📚 WHAT EACH FEATURE DOES
+==========================
+
+1. EDIT TRANSACTION ✏️
+   Problem: Can't fix mistakes in transactions
+   Solution: Edit any field (price, quantity, date, etc.)
+   
+   What you get:
+   - Edit button next to each transaction
+   - Pre-filled form with existing data
+   - Validation before saving
+   - Automatic portfolio recalculation
+
+2. DELETE TRANSACTION 🗑️
+   Problem: Can't remove wrong entries
+   Solution: Delete with confirmation
+   
+   What you get:
+   - Delete button with confirmation dialog
+   - "Are you sure?" prompt
+   - Automatic portfolio update
+   - Can't be undone (intentionally!)
+
+3. SELL STOCK 💰
+   Problem: Can only buy, not sell
+   Solution: Dedicated sell workflow
+   
+   What you get:
+   - "Sell" button for each stock
+   - Shows available quantity
+   - Calculates realized P&L
+   - Prevents selling more than owned
+   - Confirmation with gain/loss display
+
+4. PORTFOLIO ANALYTICS 📊
+   Problem: No visualization of growth
+   Solution: Interactive charts
+   
+   What you get:
+   - Growth chart over time
+   - Time period selector (1M, 3M, 6M, 1Y)
+   - Returns calculation
+   - Top performers list
+   - Total value tracking
+
+5. INDEX COMPARISON 📈
+   Problem: Can't benchmark performance
+   Solution: Compare vs market indices
+   
+   What you get:
+   - NIFTY50 comparison
+   - NIFTY500 comparison
+   - S&P500 comparison (for US stocks)
+   - Outperformance calculation
+   - Side-by-side chart
+
+═══════════════════════════════════════════════════════════════
+
+💡 IMPLEMENTATION WORKFLOW
+===========================
+
+For Each Feature:
+-----------------
+
+1. Run Agent
+   python3 dev_agent.py → Choose feature
+
+2. Get Code
+   Agent generates complete code template
+
+3. Copy to Files
+   database/db_manager.py      ← Add methods
+   ui/new_dialog.py             ← Create new file
+   ui/existing_view.py          ← Update existing
+
+4. Test
+   python3 tests/run_tests.py
+
+5. Run App
+   python3 main.py
+
+6. Verify
+   Test the feature manually
+
+7. Next Feature!
+   Repeat for next feature
+
+Time per feature: 1-8 hours (depending on complexity)
+
+═══════════════════════════════════════════════════════════════
+
+🎓 LEARNING PATH
+================
+
+WEEK 1: Critical Features (Easy)
+─────────────────────────────────
+Day 1-2: Edit Transaction    ✓ Agent generates code
+Day 3:   Delete Transaction  ✓ Agent generates code  
+Day 4-5: Sell Stock UI       ✓ Agent generates code
+
+WEEK 2: Analytics Foundation (Medium)
+──────────────────────────────────────
+Day 1-2: Portfolio history calculation
+Day 3-4: Basic charts
+Day 5:   Integrate into UI
+
+WEEK 3: Advanced Analytics (Hard)
+──────────────────────────────────
+Day 1-2: Index data fetching
+Day 3-4: Comparative charts
+Day 5:   Advanced metrics
+
+═══════════════════════════════════════════════════════════════
+
+📖 EXAMPLE: EDIT TRANSACTION
+=============================
+
+What the Agent Generates for You:
+──────────────────────────────────
+
+1. DATABASE METHODS (db_manager.py)
+```python
+def update_transaction(self, transaction_id, **updates):
+    # Updates transaction with new values
+    # Validates fields
+    # Saves to database
+    
+def get_transaction_by_id(self, transaction_id):
+    # Fetches single transaction
+    # Returns all fields
+```
+
+2. UI DIALOG (ui/edit_transaction_dialog.py)
+```python
+class EditTransactionDialog(QDialog):
+    # Pre-filled form
+    # All fields editable
+    # Save/Cancel buttons
+    # Validation
+```
+
+3. INTEGRATION (ui/portfolio_view.py)
+```python
+def edit_transaction(self, transaction_id):
+    # Opens edit dialog
+    # Refreshes portfolio after save
+```
+
+4. INSTRUCTIONS
+- Where to copy each piece of code
+- How to test it
+- What to verify
+
+═══════════════════════════════════════════════════════════════
+
+🧪 TESTING
+==========
+
+Before Implementation:
+----------------------
+python3 tests/run_tests.py --quick
+(Verify setup is correct)
+
+During Implementation:
+----------------------
+python3 tests/run_tests.py --imports
+(Check imports are correct)
+
+After Implementation:
+---------------------
+python3 tests/run_tests.py
+(Full test suite)
+
+If all pass:
+python3 main.py
+(Test manually)
+
+═══════════════════════════════════════════════════════════════
+
+🎯 SUCCESS CRITERIA
+===================
+
+Feature is Complete When:
+-------------------------
+✅ Code copied to correct files
+✅ All imports added
+✅ Tests pass
+✅ Feature works in UI
+✅ No errors in console
+✅ Data saves correctly
+✅ Portfolio updates properly
+
+═══════════════════════════════════════════════════════════════
+
+📁 FILE LOCATIONS
+=================
+
+Download & Place Here:
+----------------------
+equity-tracker/
+├── ENHANCED_FEATURES_DESIGN.md  ← Feature specs
+├── dev_agent.py                 ← Development agent
+├── AGENT_USER_GUIDE.md          ← User guide
+└── (rest of your existing files)
+
+Agent Will Help You Create:
+----------------------------
+equity-tracker/
+├── ui/
+│   ├── edit_transaction_dialog.py    ← NEW
+│   ├── sell_stock_dialog.py          ← NEW
+│   └── analytics_view.py              ← NEW
+├── services/
+│   ├── index_data_service.py          ← NEW
+│   └── analytics_service.py           ← NEW
+└── (updates to existing files)
+
+═══════════════════════════════════════════════════════════════
+
+🆘 TROUBLESHOOTING
+==================
+
+Problem: "Agent won't run"
+Solution: Make sure you're in the project folder
+          cd ~/Desktop/equity-tracker
+
+Problem: "Code doesn't work"
+Solution: Check you copied it to the right file
+          Verify imports are correct
+          Run: python3 tests/run_tests.py --imports
+
+Problem: "Feature not showing in UI"
+Solution: Restart the app
+          Check integration code was added
+          Look for errors in console
+
+Problem: "Tests fail"
+Solution: Read the error message
+          Fix the issue
+          Run tests again
+
+═══════════════════════════════════════════════════════════════
+
+💡 PRO TIPS
+===========
+
+1. Start with easiest features first
+   Edit/Delete are simpler than Analytics
+
+2. Test after each step
+   Don't wait until everything is done
+
+3. Read the agent's comments
+   The generated code has helpful explanations
+
+4. Use the agent's help option
+   Option 7 provides implementation guidance
+
+5. Keep the design doc open
+   ENHANCED_FEATURES_DESIGN.md has full specs
+
+═══════════════════════════════════════════════════════════════
+
+🎉 NEXT STEPS
+=============
+
+1. Download the 3 files above
+2. Place them in your equity-tracker folder
+3. Run: python3 dev_agent.py
+4. Choose: 1 (Implement a new feature)
+5. Select: 1 (Edit Transaction)
+6. Follow the instructions!
+
+Time to first feature: ~30 minutes setup + 2-3 hours coding
+
+═══════════════════════════════════════════════════════════════
+
+📚 DOCUMENTATION
+================
+
+ENHANCED_FEATURES_DESIGN.md
+- Complete technical specifications
+- Database schemas
+- UI mockups
+- Implementation details
+
+AGENT_USER_GUIDE.md
+- How to use the development agent
+- Feature-by-feature guides
+- Best practices
+- Troubleshooting
+
+dev_agent.py
+- The development agent itself
+- Interactive menu
+- Code generation
+- Test runner
+
+═══════════════════════════════════════════════════════════════
+
+🚀 YOU'RE READY!
+================
+
+You now have:
+✅ Complete feature specifications
+✅ AI-powered development agent
+✅ Code generation templates
+✅ Step-by-step guides
+✅ Testing framework
+
+Start building! The agent will guide you every step of the way.
+
+Run: python3 dev_agent.py
+
+Happy coding! 🎉📈
+
+═══════════════════════════════════════════════════════════════

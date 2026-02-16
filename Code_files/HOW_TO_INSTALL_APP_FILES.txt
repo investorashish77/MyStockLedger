@@ -1,0 +1,199 @@
+╔══════════════════════════════════════════════════════════════╗
+║   APPLICATION FILES - INSTALLATION INSTRUCTIONS              ║
+╚══════════════════════════════════════════════════════════════╝
+
+YOU NOW HAVE THE COMPLETE APPLICATION!
+=======================================
+
+The setup agent created the STRUCTURE. These are the APPLICATION FILES
+that go into that structure.
+
+WHERE TO PUT THESE FILES
+========================
+
+You should already have this structure from running setup_agent.py:
+
+equity-tracker/
+├── database/
+├── services/
+├── ui/
+├── utils/
+├── data/
+└── .env
+
+Now you need to COPY the downloaded files into these folders:
+
+STEP-BY-STEP INSTRUCTIONS
+==========================
+
+1. Download the "equity-tracker" folder from this chat
+   (It contains all the application files)
+
+2. Copy files from the downloaded folder to your setup folder:
+
+   COPY FROM DOWNLOAD        →  TO YOUR SETUP FOLDER
+   ════════════════════════      ════════════════════════
+   equity-tracker/main.py    →   equity-tracker/main.py
+   
+   equity-tracker/database/  →   equity-tracker/database/
+   • __init__.py
+   • db_manager.py
+   
+   equity-tracker/services/  →   equity-tracker/services/
+   • __init__.py
+   • auth_service.py
+   • stock_service.py
+   • alert_service.py
+   • ai_summary_service.py
+   
+   equity-tracker/ui/        →   equity-tracker/ui/
+   • __init__.py
+   • main_window.py
+   • login_dialog.py
+   • portfolio_view.py
+   • add_stock_dialog.py
+   • alerts_view.py
+   • summary_dialog.py
+   
+   equity-tracker/utils/     →   equity-tracker/utils/
+   • __init__.py
+   • config.py
+
+3. Your final structure should look like:
+
+   equity-tracker/
+   ├── main.py                  ← NEW
+   ├── setup_agent.py           ← Already there
+   ├── requirements.txt         ← Already there
+   ├── .env                     ← Already there
+   ├── database/
+   │   ├── __init__.py          ← NEW
+   │   ├── db_manager.py        ← NEW
+   │   └── schema.sql           ← Already there
+   ├── services/
+   │   ├── __init__.py          ← NEW
+   │   ├── auth_service.py      ← NEW
+   │   ├── stock_service.py     ← NEW
+   │   ├── alert_service.py     ← NEW
+   │   └── ai_summary_service.py ← NEW
+   ├── ui/
+   │   ├── __init__.py          ← NEW
+   │   ├── main_window.py       ← NEW
+   │   ├── login_dialog.py      ← NEW
+   │   ├── portfolio_view.py    ← NEW
+   │   ├── add_stock_dialog.py  ← NEW
+   │   ├── alerts_view.py       ← NEW
+   │   └── summary_dialog.py    ← NEW
+   ├── utils/
+   │   ├── __init__.py          ← NEW
+   │   └── config.py            ← NEW
+   └── data/
+       └── equity_tracker.db    ← Already there
+
+QUICK COPY METHOD (macOS)
+==========================
+
+Option 1 - Using Finder:
+1. Open two Finder windows
+2. Left: Your setup folder (e.g., Desktop/equity-tracker)
+3. Right: Downloaded equity-tracker folder
+4. Drag and drop folders (merge when asked)
+
+Option 2 - Using Terminal:
+cd ~/Desktop
+cp -r ~/Downloads/equity-tracker/* ~/Desktop/equity-tracker/
+
+VERIFY FILES ARE IN PLACE
+==========================
+
+Run this in Terminal to check:
+
+cd ~/Desktop/equity-tracker
+ls -la database/
+ls -la services/
+ls -la ui/
+ls -la utils/
+ls main.py
+
+You should see all the files listed above.
+
+NOW RUN THE APP!
+================
+
+cd ~/Desktop/equity-tracker
+python3 main.py
+
+WHAT TO EXPECT
+==============
+
+1. Login screen will appear
+2. Click "Register" tab
+3. Create your account:
+   - Name: Your name
+   - Mobile: 10-digit number (e.g., 9876543210)
+   - Password: At least 6 characters
+4. Click "Create Account"
+5. Switch to "Login" tab and login
+6. You're in! 🎉
+
+FIRST STEPS IN THE APP
+=======================
+
+1. Click "📊 Portfolio" tab
+2. Click "+ Add Stock"
+3. Enter a stock symbol:
+   - For Apple: AAPL
+   - For Reliance: RELIANCE.NS
+   - For TCS: TCS.NS
+4. Fill in:
+   - Quantity (e.g., 10)
+   - Price per share (auto-filled)
+   - Target price
+   - Why you're buying (thesis)
+5. Click "Add to Portfolio"
+6. View your portfolio!
+
+TEST AI SUMMARIES
+=================
+
+1. Go to "🔔 Alerts" tab
+2. Click "+ Create Sample Alert"
+3. Click "🤖 Summary" button
+4. See AI-generated analysis!
+
+Note: You need an AI API key for this (Groq is free!)
+
+TROUBLESHOOTING
+===============
+
+Error: "No module named 'PyQt5'"
+Fix: Re-run setup: python3 setup_agent.py
+
+Error: "No module named 'database'"
+Fix: Make sure __init__.py files are present in all folders
+
+Error: Can't find main.py
+Fix: Make sure main.py is in the root equity-tracker folder
+
+Error: Database error
+Fix: Delete data/equity_tracker.db and restart app
+
+NEED HELP?
+==========
+
+1. Check that ALL files are copied
+2. Verify __init__.py exists in each package folder
+3. Make sure you're in the right directory
+4. Try: python3 --version (should be 3.8+)
+
+═══════════════════════════════════════════════════════════════
+
+SUMMARY
+=======
+
+✓ Run setup_agent.py (creates structure)
+✓ Copy application files (this download)
+✓ Run: python3 main.py
+✓ Create account and start tracking!
+
+═══════════════════════════════════════════════════════════════

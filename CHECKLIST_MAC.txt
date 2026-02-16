@@ -1,0 +1,186 @@
+╔══════════════════════════════════════════════════════════════╗
+║      EQUITY TRACKER - INSTALLATION CHECKLIST (macOS)        ║
+╚══════════════════════════════════════════════════════════════╝
+
+STEP-BY-STEP GUIDE FOR MACBOOK
+================================
+
+□ STEP 1: DOWNLOAD FILES
+   ├─ Download all files to a folder (e.g., ~/equity-tracker/)
+   └─ Files you should have:
+      • setup_agent.py
+      • requirements.txt
+      • SETUP.sh
+      • README.md
+      • INSTALL_MAC.md
+      • test_installation.py
+
+□ STEP 2: RUN SETUP
+   Choose ONE option:
+   
+   Option A (Easiest - Double-click):
+   ├─ Open Terminal
+   ├─ Navigate to folder: cd ~/equity-tracker
+   ├─ Make script executable: chmod +x SETUP.sh
+   ├─ Run: ./SETUP.sh
+   └─ Wait 2-3 minutes
+   
+   Option B (Manual):
+   ├─ Open Terminal (Cmd + Space, type "Terminal")
+   ├─ Navigate: cd ~/equity-tracker
+   ├─ Type: python3 setup_agent.py
+   └─ Press Enter
+
+□ STEP 3: VERIFY INSTALLATION (Optional but recommended)
+   ├─ In Terminal, type: python3 test_installation.py
+   └─ You should see "ALL TESTS PASSED"
+
+□ STEP 4: CONFIGURE (Optional - for AI features)
+   ├─ Open: .env file in TextEdit
+   │  Command: open -a TextEdit .env
+   ├─ Get FREE API key from: https://console.groq.com
+   ├─ Add key to .env file:
+   │  AI_PROVIDER=groq
+   │  GROQ_API_KEY=your_key_here
+   └─ Save and close (Cmd + S, Cmd + Q)
+
+□ STEP 5: RUN THE APP
+   ├─ In Terminal: python3 main.py
+   └─ App will launch!
+
+□ STEP 6: FIRST TIME SETUP
+   ├─ Create your user account
+   ├─ Add your first stock
+   └─ Test features
+
+╔══════════════════════════════════════════════════════════════╗
+║                    WHAT YOU NEED                             ║
+╚══════════════════════════════════════════════════════════════╝
+
+ALREADY HAVE (✓):
+✓ MacBook
+✓ Python 3 (usually pre-installed on macOS)
+
+TO CHECK PYTHON:
+• Open Terminal
+• Type: python3 --version
+• Should show: Python 3.8 or higher
+
+IF PYTHON IS MISSING:
+Install via Homebrew:
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  brew install python3
+
+NEED TO DOWNLOAD (from this chat):
+□ setup_agent.py
+□ requirements.txt
+□ SETUP.sh
+□ README.md
+□ INSTALL_MAC.md
+□ test_installation.py
+
+OPTIONAL (for AI summaries):
+□ Groq API key (FREE) - https://console.groq.com
+   OR
+□ Claude API key (paid) - https://console.anthropic.com
+
+╔══════════════════════════════════════════════════════════════╗
+║                 INSTALLATION TIME                            ║
+╚══════════════════════════════════════════════════════════════╝
+
+⏱️ Download files:        1 minute
+⏱️ Run setup:             2-3 minutes
+⏱️ Configure API:         2 minutes (optional)
+⏱️ Test app:              1 minute
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   TOTAL TIME:            5-10 minutes
+
+╔══════════════════════════════════════════════════════════════╗
+║                    DISK SPACE                                ║
+╚══════════════════════════════════════════════════════════════╝
+
+Python packages:         ~100 MB
+Project files:           ~5 MB
+Database:                ~1 MB (grows with data)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TOTAL:                   ~106 MB
+
+╔══════════════════════════════════════════════════════════════╗
+║                  MAC-SPECIFIC NOTES                          ║
+╚══════════════════════════════════════════════════════════════╝
+
+✓ Use python3 (not python) on Mac
+✓ Use pip3 (not pip) on Mac
+✓ Terminal is your friend (Cmd + Space → "Terminal")
+✓ PyQt5 works great on macOS!
+
+╔══════════════════════════════════════════════════════════════╗
+║                  TROUBLESHOOTING                             ║
+╚══════════════════════════════════════════════════════════════╝
+
+Problem: "python3: command not found"
+Fix: Install Python 3 via Homebrew (see above)
+
+Problem: "Permission denied" when running SETUP.sh
+Fix: chmod +x SETUP.sh
+
+Problem: pip3 install fails with SSL error
+Fix: /Applications/Python\ 3.x/Install\ Certificates.command
+
+Problem: Can't find .env file
+Fix: Show hidden files: Cmd + Shift + . in Finder
+
+Problem: PyQt5 installation fails
+Fix: Install via Homebrew: brew install pyqt5
+
+╔══════════════════════════════════════════════════════════════╗
+║                  TERMINAL COMMANDS QUICK GUIDE               ║
+╚══════════════════════════════════════════════════════════════╝
+
+Open Terminal:        Cmd + Space → type "Terminal"
+Navigate to folder:   cd ~/equity-tracker
+List files:           ls -la
+Check Python:         python3 --version
+Run setup:            python3 setup_agent.py
+Run app:              python3 main.py
+Edit .env:            nano .env  (or: open -a TextEdit .env)
+Make executable:      chmod +x SETUP.sh
+
+╔══════════════════════════════════════════════════════════════╗
+║                     NEXT STEPS                               ║
+╚══════════════════════════════════════════════════════════════╝
+
+After installation:
+1. Run: python3 main.py
+2. Create your account
+3. Add your first stock (e.g., AAPL for Apple)
+4. Test AI summary feature
+5. Set up alerts
+
+For detailed help:
+- Read: README.md
+- Check: INSTALL_MAC.md
+- Review: logs/app.log
+
+╔══════════════════════════════════════════════════════════════╗
+║                      SUPPORT                                 ║
+╚══════════════════════════════════════════════════════════════╝
+
+If you get stuck:
+1. Run: python3 test_installation.py
+2. Check the error messages
+3. Review INSTALL_MAC.md
+4. Check logs/app.log
+
+╔══════════════════════════════════════════════════════════════╗
+║                  READY TO START?                             ║
+╚══════════════════════════════════════════════════════════════╝
+
+Quick Start (3 commands):
+1. cd ~/equity-tracker
+2. chmod +x SETUP.sh && ./SETUP.sh
+3. python3 main.py
+
+That's it! You're ready to track your portfolio! 📈
+
+═══════════════════════════════════════════════════════════════

@@ -1,0 +1,193 @@
+╔══════════════════════════════════════════════════════════════╗
+║   EQUITY TRACKER - QUICK START FOR MAC (3 COMMANDS)         ║
+╚══════════════════════════════════════════════════════════════╝
+
+FASTEST WAY TO GET STARTED
+===========================
+
+1. Download all files to a folder (e.g., Desktop/equity-tracker)
+
+2. Open Terminal (Cmd + Space → "Terminal")
+
+3. Run these 3 commands:
+
+   cd ~/Desktop/equity-tracker
+   chmod +x SETUP.sh && ./SETUP.sh
+   python3 main.py
+
+   That's it! ✅
+
+═══════════════════════════════════════════════════════════════
+
+WHAT EACH COMMAND DOES
+=======================
+
+Command 1: cd ~/Desktop/equity-tracker
+→ Navigate to your project folder
+
+Command 2: chmod +x SETUP.sh && ./SETUP.sh
+→ Make setup script executable AND run it
+→ Installs everything automatically (2-3 min)
+
+Command 3: python3 main.py
+→ Launch the app!
+
+═══════════════════════════════════════════════════════════════
+
+FIRST TIME APP OPENS
+=====================
+
+1. Create your account (mobile + password)
+2. Click "Add Stock"
+3. Enter: AAPL (or any stock symbol)
+4. Add purchase details
+5. Save!
+
+═══════════════════════════════════════════════════════════════
+
+ENABLE AI SUMMARIES (OPTIONAL)
+===============================
+
+1. Get FREE API key: https://console.groq.com
+2. In Terminal:
+   
+   open -a TextEdit .env
+
+3. Add these lines:
+   
+   AI_PROVIDER=groq
+   GROQ_API_KEY=paste_your_key_here
+
+4. Save (Cmd + S) and close
+5. Restart app: python3 main.py
+
+═══════════════════════════════════════════════════════════════
+
+TROUBLESHOOTING
+===============
+
+Problem: "python3: command not found"
+Fix: Install Python:
+     brew install python3
+
+Problem: "Permission denied"
+Fix: chmod +x SETUP.sh
+
+Problem: Setup fails
+Fix: Run as:
+     sudo python3 setup_agent.py
+
+═══════════════════════════════════════════════════════════════
+
+STOCK SYMBOLS FOR INDIAN MARKETS
+=================================
+
+NSE stocks: Add .NS suffix
+Example: RELIANCE.NS, TCS.NS, INFY.NS
+
+BSE stocks: Add .BO suffix
+Example: RELIANCE.BO, TCS.BO
+
+US stocks: No suffix needed
+Example: AAPL, MSFT, GOOGL
+
+═══════════════════════════════════════════════════════════════
+
+DAILY USAGE
+===========
+
+To open app each day:
+
+cd ~/Desktop/equity-tracker && python3 main.py
+
+Or create alias (one-time setup):
+
+echo 'alias equity="cd ~/Desktop/equity-tracker && python3 main.py"' >> ~/.zshrc
+source ~/.zshrc
+
+Then just type: equity ✨
+
+═══════════════════════════════════════════════════════════════
+
+FEATURES
+========
+
+✓ Track stocks & investments
+✓ Document why you bought (thesis)
+✓ Set price targets
+✓ Get real-time prices
+✓ Receive corporate announcements
+✓ AI-powered summaries (with API key)
+✓ Calculate P&L automatically
+
+═══════════════════════════════════════════════════════════════
+
+COST
+====
+
+Everything: $0
+Optional AI (Groq): $0 (free tier)
+Optional AI (Claude): ~$0.15/month
+
+═══════════════════════════════════════════════════════════════
+
+SYSTEM REQUIREMENTS
+===================
+
+✓ macOS 10.14+
+✓ Python 3.8+
+✓ ~100 MB disk space
+✓ Internet connection
+
+Works on:
+✓ M1/M2/M3 Macs
+✓ Intel Macs
+
+═══════════════════════════════════════════════════════════════
+
+FILES TO DOWNLOAD
+=================
+
+Essential:
+1. setup_agent.py       ← Main installer
+2. requirements.txt     ← Package list
+3. SETUP.sh             ← Quick installer
+4. CHECKLIST_MAC.txt    ← This file
+
+Documentation:
+5. README.md            ← Full guide
+6. INSTALL_MAC.md       ← Detailed setup
+7. test_installation.py ← Test script
+
+═══════════════════════════════════════════════════════════════
+
+NEXT AFTER INSTALLATION
+=======================
+
+1. python3 main.py           ← Start app
+2. Create account            ← One-time
+3. Add your first stock      ← AAPL, RELIANCE.NS, etc.
+4. (Optional) Get Groq key   ← For AI summaries
+5. Edit .env file            ← Add API key
+6. Enjoy! 📈
+
+═══════════════════════════════════════════════════════════════
+
+SUPPORT
+=======
+
+Check logs: cat logs/app.log
+Test setup: python3 test_installation.py
+Full guide: open README.md
+
+═══════════════════════════════════════════════════════════════
+
+Ready? Copy-paste these 3 commands:
+
+cd ~/Desktop/equity-tracker
+chmod +x SETUP.sh && ./SETUP.sh
+python3 main.py
+
+🚀 That's it! Happy trading! 📈
+
+═══════════════════════════════════════════════════════════════

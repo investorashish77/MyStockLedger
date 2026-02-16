@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# Environment variables
+.env
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data files
+data/*.csv
+data/*.json
+
+# Local ingest/cache snapshots
+BhavCopy/
+announcements/
+
+# Secrets / credentials artifacts
+*.pem
+*.key
+*.p12
+*.crt
+*.cer
+*api_key*.zip
+
+# Build / test artifacts
+.pytest_cache/
+.mypy_cache/
