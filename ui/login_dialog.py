@@ -35,7 +35,10 @@ class LoginDialog(QDialog):
         # Brand row
         brand_row = QHBoxLayout()
         logo = QLabel()
-        logo_path = Path(__file__).resolve().parent.parent / "assets" / "images" / "equityjournal_logo_light.png"
+        images_dir = Path(__file__).resolve().parent.parent / "assets" / "images"
+        logo_path = images_dir / "equityjournal_logo_light.png"
+        if not logo_path.exists():
+            logo_path = images_dir / "logo_light_theme.png"
         if logo_path.exists():
             logo.setPixmap(QPixmap(str(logo_path)).scaled(28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         brand_row.addStretch()

@@ -256,8 +256,17 @@ class MainWindow(QMainWindow):
             self.logo_label.clear()
 
     def _logo_file_for_theme(self) -> Path:
-        file_name = "equityjournal_logo_dark.png" if self.current_theme == "dark" else "equityjournal_logo_light.png"
-        return Path(__file__).resolve().parent.parent / "assets" / "images" / file_name
+        images_dir = Path(__file__).resolve().parent.parent / "assets" / "images"
+        candidates = (
+            ["equityjournal_logo_dark.png", "logo_dark_theme.png"]
+            if self.current_theme == "dark"
+            else ["equityjournal_logo_light.png", "logo_light_theme.png"]
+        )
+        for name in candidates:
+            path = images_dir / name
+            if path.exists():
+                return path
+        return images_dir / candidates[0]
     
     def closeEvent(self, event):
         """Handle window close event"""
