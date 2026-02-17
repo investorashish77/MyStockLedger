@@ -273,6 +273,42 @@ class DatabaseManager:
         
         self._close_connection(conn)
         return transactions
+
+    def get_user_journal_notes(self, user_id: int) -> List[Dict]:
+        """Get latest non-empty thesis note per stock for a user."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT s.stock_id, s.symbol, s.company_name,
+                   t.transaction_id, t.transaction_date, t.thesis
+            FROM stocks s
+            JOIN transactions t ON s.stock_id = t.stock_id
+            JOIN (
+                SELECT stock_id, MAX(transaction_date) AS latest_date
+                FROM transactions
+                WHERE thesis IS NOT NULL AND TRIM(thesis) <> ''
+                GROUP BY stock_id
+            ) last_t
+              ON last_t.stock_id = t.stock_id
+             AND last_t.latest_date = t.transaction_date
+            WHERE s.user_id = ?
+              AND t.thesis IS NOT NULL
+              AND TRIM(t.thesis) <> ''
+            ORDER BY t.transaction_date DESC, s.symbol ASC
+        """, (user_id,))
+        rows = cursor.fetchall()
+        self._close_connection(conn)
+        return [
+            {
+                "stock_id": row[0],
+                "symbol": row[1],
+                "company_name": row[2],
+                "transaction_id": row[3],
+                "transaction_date": row[4],
+                "thesis": row[5],
+            }
+            for row in rows
+        ]
     
     def get_portfolio_summary(self, user_id: int) -> List[Dict]:
         """Get portfolio summary with holdings"""

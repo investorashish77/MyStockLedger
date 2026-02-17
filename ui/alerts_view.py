@@ -6,9 +6,8 @@ Shows important portfolio-specific corporate filings with document links and con
 from datetime import datetime
 
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget,
-    QTableWidgetItem, QLabel, QHeaderView, QMessageBox, QComboBox,
-    QDialog, QTextBrowser, QStyle
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QMessageBox, QComboBox,
+    QDialog, QTextBrowser, QStyle, QScrollArea, QFrame
 )
 from PyQt5.QtCore import QUrl
 from PyQt5.QtGui import QFont, QDesktopServices
@@ -77,18 +76,15 @@ class AlertsView(QWidget):
         header.addWidget(sync_btn)
         layout.addLayout(header)
 
-        self.table = QTableWidget()
-        self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels([
-            "Category", "Company Name", "BSE Code", "NSE Code", "Document", "Announcement", "Announcement Date"
-        ])
-        self.table.cellDoubleClicked.connect(self.open_filing_details)
-        header_view = self.table.horizontalHeader()
-        header_view.setSectionResizeMode(1, QHeaderView.Stretch)
-        header_view.setSectionResizeMode(5, QHeaderView.Stretch)
-        self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        layout.addWidget(self.table)
+        self.timeline_scroll = QScrollArea()
+        self.timeline_scroll.setWidgetResizable(True)
+        self.timeline_container = QWidget()
+        self.timeline_layout = QVBoxLayout()
+        self.timeline_layout.setContentsMargins(4, 4, 4, 4)
+        self.timeline_layout.setSpacing(10)
+        self.timeline_container.setLayout(self.timeline_layout)
+        self.timeline_scroll.setWidget(self.timeline_container)
+        layout.addWidget(self.timeline_scroll)
 
         self.info_label = QLabel()
         layout.addWidget(self.info_label)
@@ -135,33 +131,18 @@ class AlertsView(QWidget):
             limit=500
         )
         self.current_filings = filings
-        self.table.setRowCount(0)
+        while self.timeline_layout.count():
+            child = self.timeline_layout.takeAt(0)
+            widget = child.widget()
+            if widget:
+                widget.deleteLater()
         if not filings:
             self.info_label.setText("No filings found for selected filters.")
             return
 
-        for i, filing in enumerate(filings):
-            self.table.insertRow(i)
-            self.table.setItem(i, 0, QTableWidgetItem(filing.get("category") or "General Update"))
-            self.table.setItem(i, 1, QTableWidgetItem(filing.get("company_name") or filing.get("symbol") or "-"))
-            self.table.setItem(i, 2, QTableWidgetItem(filing.get("bse_code") or "-"))
-            self.table.setItem(i, 3, QTableWidgetItem(filing.get("nse_code") or filing.get("symbol") or "-"))
-
-            doc_url = self.resolve_document_url(filing.get("pdf_link"))
-            doc_btn = QPushButton()
-            doc_btn.setIcon(self.style().standardIcon(QStyle.SP_FileIcon))
-            doc_btn.setToolTip("Open filing document")
-            doc_btn.setEnabled(bool(doc_url))
-            doc_btn.clicked.connect(lambda checked, url=doc_url: self.open_pdf(url))
-            self.table.setCellWidget(i, 4, doc_btn)
-
-            summary = filing.get("announcement_summary") or filing.get("headline") or "-"
-            brief = summary if len(summary) <= 220 else f"{summary[:217]}..."
-            item = QTableWidgetItem(brief)
-            item.setToolTip(summary)
-            self.table.setItem(i, 5, item)
-
-            self.table.setItem(i, 6, QTableWidgetItem(filing.get("announcement_date") or "-"))
+        for filing in filings:
+            self.timeline_layout.addWidget(self._build_timeline_card(filing))
+        self.timeline_layout.addStretch()
 
         self.info_label.setText(f"Showing {len(filings)} filing(s).")
 
@@ -207,6 +188,7 @@ class AlertsView(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Filing Details - {filing.get('symbol')}")
         dialog.resize(860, 560)
+        self._apply_active_theme(dialog)
         layout = QVBoxLayout(dialog)
         title = QLabel(
             f"{filing.get('company_name') or filing.get('symbol')} | "
@@ -247,3 +229,93 @@ class AlertsView(QWidget):
         self.db.set_setting(self.SETTING_BACKFILL_DONE, "1")
         self.db.set_setting(self.SETTING_LAST_SYNC_DATE, today)
         return ingested, f" [{from_date}..{today}]"
+
+    @staticmethod
+    def _category_color(category: str) -> str:
+        cat = (category or "").lower()
+        mapping = {
+            "results": "#3D5AFE",
+            "earnings call": "#8E44AD",
+            "order wins": "#16A085",
+            "fund raising": "#F39C12",
+            "capacity expansion": "#2E86DE",
+            "bonus issue": "#E67E22",
+            "acquisitions": "#9B59B6",
+            "open offer": "#C0392B",
+        }
+        return mapping.get(cat, "#5D6D7E")
+
+    def _build_timeline_card(self, filing: dict) -> QWidget:
+        card = QFrame()
+        card.setObjectName("timelineCard")
+        card.setStyleSheet(
+            "QFrame#timelineCard { border: 1px solid #D8E1EA; border-radius: 10px; padding: 8px; }"
+        )
+        root = QVBoxLayout()
+        root.setContentsMargins(10, 8, 10, 8)
+        root.setSpacing(6)
+        card.setLayout(root)
+
+        top = QHBoxLayout()
+        category = filing.get("category") or "General Update"
+        category_lbl = QLabel(category)
+        category_lbl.setStyleSheet(
+            f"background:{self._category_color(category)}; color:white; border-radius:10px; padding:3px 9px; font-size:11px;"
+        )
+        top.addWidget(category_lbl)
+        top.addStretch()
+        top.addWidget(QLabel(filing.get("announcement_date") or "-"))
+        root.addLayout(top)
+
+        title = QLabel(f"{filing.get('company_name') or filing.get('symbol') or '-'}")
+        title.setStyleSheet("font-weight:700; font-size:13px;")
+        root.addWidget(title)
+
+        meta = QLabel(f"BSE: {filing.get('bse_code') or '-'}   |   NSE: {filing.get('nse_code') or filing.get('symbol') or '-'}")
+        meta.setStyleSheet("color:#718096; font-size:11px;")
+        root.addWidget(meta)
+
+        summary = filing.get("announcement_summary") or filing.get("headline") or "-"
+        brief = summary if len(summary) <= 220 else f"{summary[:217]}..."
+        summary_lbl = QLabel(brief)
+        summary_lbl.setWordWrap(True)
+        summary_lbl.setToolTip(summary)
+        root.addWidget(summary_lbl)
+
+        actions = QHBoxLayout()
+        actions.addStretch()
+        doc_url = self.resolve_document_url(filing.get("pdf_link"))
+        doc_btn = QPushButton("Open Document")
+        doc_btn.setIcon(self.style().standardIcon(QStyle.SP_FileIcon))
+        doc_btn.setEnabled(bool(doc_url))
+        doc_btn.clicked.connect(lambda _=False, url=doc_url: self.open_pdf(url))
+        details_btn = QPushButton("Details")
+        details_btn.clicked.connect(lambda _=False, f=filing: self.open_filing_detail_dialog(f))
+        actions.addWidget(doc_btn)
+        actions.addWidget(details_btn)
+        root.addLayout(actions)
+        return card
+
+    def open_filing_detail_dialog(self, filing: dict):
+        summary = filing.get("announcement_summary") or filing.get("headline") or "-"
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Filing Details - {filing.get('symbol')}")
+        dialog.resize(860, 560)
+        self._apply_active_theme(dialog)
+        layout = QVBoxLayout(dialog)
+        title = QLabel(
+            f"{filing.get('company_name') or filing.get('symbol')} | "
+            f"{filing.get('category') or 'General Update'} | "
+            f"{filing.get('announcement_date') or '-'}"
+        )
+        title.setWordWrap(True)
+        layout.addWidget(title)
+        browser = QTextBrowser()
+        browser.setPlainText(summary)
+        layout.addWidget(browser)
+        dialog.exec_()
+
+    def _apply_active_theme(self, widget: QWidget):
+        win = self.window() if hasattr(self, "window") else None
+        if win and hasattr(win, "styleSheet"):
+            widget.setStyleSheet(win.styleSheet())

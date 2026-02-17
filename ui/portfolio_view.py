@@ -5,7 +5,7 @@ Displays user's stock portfolio with P&L calculations
 
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QTableWidget, QTableWidgetItem, QLabel, QHeaderView,
-                             QMessageBox, QDialog, QFrame)
+                             QMessageBox, QDialog, QFrame, QToolButton, QMenu, QAction, QProgressBar)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QColor
 from database.db_manager import DatabaseManager
@@ -28,7 +28,7 @@ class PortfolioView(QWidget):
         layout = QVBoxLayout()
         self.setLayout(layout)
         
-        # Header with Add Stock button
+        # Header with Add Transaction button
         header = QHBoxLayout()
         
         title = QLabel("My Portfolio")
@@ -40,34 +40,12 @@ class PortfolioView(QWidget):
         
         header.addStretch()
         
-        add_btn = QPushButton("+ Add Stock")
+        add_btn = QPushButton("+ Add Transaction")
         add_btn.clicked.connect(self.add_stock)
-        add_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                padding: 10px 20px;
-                border: none;
-                border-radius: 4px;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-        """)
+        add_btn.setStyleSheet("font-weight: 700;")
         header.addWidget(add_btn)
         
         layout.addLayout(header)
-
-        # KPI cards
-        self.kpi_layout = QHBoxLayout()
-        self.daily_kpi = self._build_kpi_card("Daily Gain/Loss")
-        self.weekly_kpi = self._build_kpi_card("Weekly Gain/Loss")
-        self.overall_kpi = self._build_kpi_card("Overall Gain/Loss")
-        self.kpi_layout.addWidget(self.daily_kpi)
-        self.kpi_layout.addWidget(self.weekly_kpi)
-        self.kpi_layout.addWidget(self.overall_kpi)
-        layout.addLayout(self.kpi_layout)
 
         # Portfolio summary
         self.summary_label = QLabel()
@@ -75,35 +53,20 @@ class PortfolioView(QWidget):
         
         # Portfolio table
         self.table = QTableWidget()
-        self.table.setColumnCount(9)
+        self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels([
-            'Symbol', 'Company', 'Quantity', 'Avg Price', 
-            'Current Price', 'Investment', 'Current Value', 'P&L', 'Actions'
+            'Asset', 'Quantity', 'Avg Price', 'Current Price', 'Investment', 'Weight', 'P&L', 'Actions'
         ])
         
         # Set column widths
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        
-        self.table.setStyleSheet("""
-            QTableWidget {
-                border: 1px solid #ddd;
-                border-radius: 4px;
-            }
-            QHeaderView::section {
-                background-color: #f0f0f0;
-                padding: 8px;
-                border: none;
-                font-weight: bold;
-            }
-            QTableWidget::item {
-                padding: 8px;
-            }
-        """)
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
         
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.verticalHeader().setDefaultSectionSize(58)
         self.table.doubleClicked.connect(self.view_stock_details)
         
         layout.addWidget(self.table)
@@ -127,7 +90,7 @@ class PortfolioView(QWidget):
         card.setLayout(inner)
         return card
     
-    def load_portfolio(self, user_id: int):
+    def load_portfolio(self, user_id: int, use_live_quotes: bool = True):
         """Load portfolio for user"""
         self.current_user_id = user_id
         self.table.setRowCount(0)
@@ -136,63 +99,84 @@ class PortfolioView(QWidget):
         portfolio = self.db.get_portfolio_summary(user_id)
         
         if not portfolio:
-            self.summary_label.setText("No stocks in portfolio. Click '+ Add Stock' to get started!")
+            self.summary_label.setText("No stocks in portfolio. Click '+ Add Transaction' to get started!")
             return
         
-        # Calculate totals
-        total_invested = 0
-        total_current_value = 0
-        total_daily_pnl = 0
-        total_weekly_pnl = 0
-        
-        # Populate table
-        for i, stock in enumerate(portfolio):
-            self.table.insertRow(i)
-            
+        # Calculate totals + resolve prices first (needed for weightage accuracy)
+        total_invested = 0.0
+        total_current_value = 0.0
+        total_daily_pnl = 0.0
+        total_weekly_pnl = 0.0
+        computed_rows = []
+
+        for stock in portfolio:
             symbol = stock['symbol']
             exchange = stock.get('exchange')
             quantity = stock['quantity']
             avg_price = stock['avg_price']
-            
-            # Get current price
+
             quote_symbol = self.stock_service.to_quote_symbol(symbol, exchange=exchange)
-            current_price = self.stock_service.get_current_price(quote_symbol)
-            
-            if current_price is None:
-                current_price = avg_price  # Fallback
-            else:
-                self.db.save_price(stock['stock_id'], current_price)
-            
-            # Calculate values
+            current_price = self.db.get_latest_price(stock['stock_id']) or avg_price
+            if use_live_quotes:
+                live_price = self.stock_service.get_current_price(quote_symbol)
+                if live_price is not None:
+                    current_price = live_price
+                    self.db.save_price(stock['stock_id'], current_price)
+
             investment = avg_price * quantity
             current_value = current_price * quantity
             pnl = current_value - investment
-            pnl_pct = (pnl / investment * 100) if investment > 0 else 0
-
-            daily_pnl = self._compute_daily_pnl(quote_symbol, current_price, quantity)
-            weekly_pnl = self._compute_weekly_pnl(quote_symbol, current_price, quantity)
-            total_daily_pnl += daily_pnl
-            total_weekly_pnl += weekly_pnl
-            
+            daily_pnl = self._compute_daily_pnl(quote_symbol, current_price, quantity) if use_live_quotes else 0.0
+            weekly_pnl = self._compute_weekly_pnl(quote_symbol, current_price, quantity) if use_live_quotes else 0.0
             total_invested += investment
             total_current_value += current_value
-            
-            # Add to table
-            self.table.setItem(i, 0, QTableWidgetItem(symbol))
-            self.table.setItem(i, 1, QTableWidgetItem(stock['company_name']))
-            self.table.setItem(i, 2, QTableWidgetItem(str(int(quantity))))
-            self.table.setItem(i, 3, QTableWidgetItem(f"₹{avg_price:.2f}"))
-            self.table.setItem(i, 4, QTableWidgetItem(f"₹{current_price:.2f}"))
-            self.table.setItem(i, 5, QTableWidgetItem(f"₹{investment:,.2f}"))
-            self.table.setItem(i, 6, QTableWidgetItem(f"₹{current_value:,.2f}"))
+
+            total_daily_pnl += daily_pnl
+            total_weekly_pnl += weekly_pnl
+
+            computed_rows.append({
+                "stock": stock,
+                "symbol": symbol,
+                "quantity": quantity,
+                "avg_price": avg_price,
+                "current_price": current_price,
+                "investment": investment,
+                "current_value": current_value,
+                "pnl": pnl,
+            })
+
+        # Populate table
+        for i, row in enumerate(computed_rows):
+            self.table.insertRow(i)
+            stock = row["stock"]
+            symbol = row["symbol"]
+            quantity = row["quantity"]
+            avg_price = row["avg_price"]
+            current_price = row["current_price"]
+            investment = row["investment"]
+            current_value = row["current_value"]
+            pnl = row["pnl"]
+            pnl_pct = (pnl / investment * 100) if investment > 0 else 0.0
+
+            asset_widget = self._build_asset_cell(symbol, stock['company_name'])
+            self.table.setCellWidget(i, 0, asset_widget)
+            qty_item = QTableWidgetItem(str(int(quantity)))
+            qty_item.setData(Qt.UserRole, stock['stock_id'])
+            qty_item.setData(Qt.UserRole + 1, symbol)
+            self.table.setItem(i, 1, qty_item)
+            self.table.setItem(i, 2, QTableWidgetItem(f"₹{avg_price:.2f}"))
+            self.table.setItem(i, 3, QTableWidgetItem(f"₹{current_price:.2f}"))
+            self.table.setItem(i, 4, QTableWidgetItem(f"₹{investment:,.2f}"))
 
             # Investment note preview (latest non-empty thesis)
             transactions = self.db.get_stock_transactions(stock['stock_id'])
             theses = [t['thesis'].strip() for t in transactions if t.get('thesis') and t['thesis'].strip()]
             note_preview = theses[0] if theses else "No investment notes added."
             tooltip_text = f"Investment Note:\n{note_preview}"
-            self.table.item(i, 0).setToolTip(tooltip_text)
-            self.table.item(i, 1).setToolTip(tooltip_text)
+            asset_widget.setToolTip(tooltip_text)
+
+            weight_pct = (current_value / total_current_value * 100) if total_current_value > 0 else 0.0
+            self.table.setCellWidget(i, 5, self._build_weight_cell(weight_pct))
             
             # P&L with color
             pnl_item = QTableWidgetItem(f"₹{pnl:,.2f} ({pnl_pct:+.2f}%)")
@@ -200,31 +184,9 @@ class PortfolioView(QWidget):
                 pnl_item.setForeground(QColor('#4CAF50'))
             elif pnl < 0:
                 pnl_item.setForeground(QColor('#F44336'))
-            self.table.setItem(i, 7, pnl_item)
+            self.table.setItem(i, 6, pnl_item)
 
-            # Row actions: edit transactions and delete stock
-            actions_widget = QWidget()
-            actions_layout = QHBoxLayout()
-            actions_layout.setContentsMargins(5, 2, 5, 2)
-
-            edit_btn = QPushButton("Edit")
-            edit_btn.clicked.connect(
-                lambda checked, sid=stock['stock_id'], sym=symbol: self.open_stock_transactions(sid, sym)
-            )
-            actions_layout.addWidget(edit_btn)
-
-            delete_btn = QPushButton("Delete")
-            delete_btn.setStyleSheet("background-color: #f44336; color: white;")
-            delete_btn.clicked.connect(
-                lambda checked, sid=stock['stock_id'], sym=symbol: self.delete_stock_position(sid, sym)
-            )
-            actions_layout.addWidget(delete_btn)
-
-            actions_widget.setLayout(actions_layout)
-            self.table.setCellWidget(i, 8, actions_widget)
-            
-            # Store stock_id in row
-            self.table.item(i, 0).setData(Qt.UserRole, stock['stock_id'])
+            self.table.setCellWidget(i, 7, self._build_actions_cell(stock['stock_id'], symbol))
         
         # Update summary
         total_pnl = total_current_value - total_invested
@@ -240,9 +202,6 @@ class PortfolioView(QWidget):
             P&L: ₹{total_pnl:,.2f} ({total_pnl_pct:+.2f}%)
             </span>
         """)
-        self._set_kpi_value(self.daily_kpi, total_daily_pnl)
-        self._set_kpi_value(self.weekly_kpi, total_weekly_pnl)
-        self._set_kpi_value(self.overall_kpi, total_pnl)
 
     def _compute_daily_pnl(self, quote_symbol: str, current_price: float, quantity: int) -> float:
         info = self.stock_service.get_stock_info(quote_symbol) or {}
@@ -286,9 +245,81 @@ class PortfolioView(QWidget):
     def view_stock_details(self, index):
         """Open transaction manager when row is double-clicked."""
         row = index.row()
-        stock_id = self.table.item(row, 0).data(Qt.UserRole)
-        symbol = self.table.item(row, 0).text()
+        marker = self.table.item(row, 1)
+        stock_id = marker.data(Qt.UserRole) if marker else None
+        symbol = marker.data(Qt.UserRole + 1) if marker else ""
+        if not stock_id:
+            return
         self.open_stock_transactions(stock_id, symbol)
+
+    @staticmethod
+    def _build_asset_cell(symbol: str, company_name: str) -> QWidget:
+        widget = QWidget()
+        row = QHBoxLayout()
+        row.setContentsMargins(6, 2, 6, 2)
+        row.setSpacing(8)
+        initials = (symbol or "?")[:2].upper()
+        bubble = QLabel(initials)
+        bubble.setAlignment(Qt.AlignCenter)
+        bubble.setFixedSize(26, 26)
+        bubble.setStyleSheet(
+            "background:#2D5A88;color:white;border-radius:13px;font-weight:700;font-size:11px;"
+        )
+        text_col = QVBoxLayout()
+        sym_lbl = QLabel(symbol)
+        sym_lbl.setStyleSheet("font-weight:600;")
+        cmp_lbl = QLabel(company_name)
+        cmp_lbl.setStyleSheet("font-size:11px;color:#7A8794;")
+        text_col.addWidget(sym_lbl)
+        text_col.addWidget(cmp_lbl)
+        row.addWidget(bubble)
+        row.addLayout(text_col)
+        row.addStretch()
+        widget.setLayout(row)
+        return widget
+
+    @staticmethod
+    def _build_weight_cell(weight_pct: float) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(4)
+        pct_label = QLabel(f"{weight_pct:.1f}%")
+        pct_label.setStyleSheet("font-size:12px;font-weight:600;")
+        bar = QProgressBar()
+        bar.setRange(0, 100)
+        bar.setValue(int(max(0.0, min(weight_pct, 100.0))))
+        bar.setTextVisible(False)
+        bar.setFixedHeight(8)
+        bar.setStyleSheet(
+            "QProgressBar{border:0;background:#E6ECF2;border-radius:3px;}"
+            "QProgressBar::chunk{background:#3D5AFE;border-radius:3px;}"
+        )
+        layout.addWidget(pct_label)
+        layout.addWidget(bar)
+        widget.setLayout(layout)
+        return widget
+
+    def _build_actions_cell(self, stock_id: int, symbol: str) -> QWidget:
+        container = QWidget()
+        layout = QHBoxLayout()
+        layout.setContentsMargins(6, 0, 6, 0)
+        menu_btn = QToolButton()
+        menu_btn.setText("⋮")
+        menu_btn.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(menu_btn)
+        open_action = QAction("View Transactions", menu_btn)
+        open_action.triggered.connect(lambda: self.open_stock_transactions(stock_id, symbol))
+        delete_action = QAction("Delete Stock", menu_btn)
+        delete_action.triggered.connect(lambda: self.delete_stock_position(stock_id, symbol))
+        menu.addAction(open_action)
+        menu.addSeparator()
+        menu.addAction(delete_action)
+        menu_btn.setMenu(menu)
+        layout.addWidget(menu_btn)
+        layout.addStretch()
+        container.setLayout(layout)
+        return container
 
     def open_stock_transactions(self, stock_id, symbol):
         """View stock transactions with edit/delete options."""
@@ -298,6 +329,7 @@ class PortfolioView(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle(f"{symbol} - Transactions")
         dialog.setMinimumSize(800, 400)
+        self._apply_active_theme(dialog)
         
         layout = QVBoxLayout()
         
@@ -359,6 +391,11 @@ class PortfolioView(QWidget):
         
         dialog.setLayout(layout)
         dialog.exec_()
+
+    def _apply_active_theme(self, widget: QWidget):
+        win = self.window() if hasattr(self, "window") else None
+        if win and hasattr(win, "styleSheet"):
+            widget.setStyleSheet(win.styleSheet())
 
     def edit_transaction(self, transaction_id, parent_dialog):
         """Edit a transaction."""

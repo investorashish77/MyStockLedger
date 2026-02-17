@@ -43,6 +43,7 @@ class Config:
         # App settings
         self.APP_NAME = os.getenv('APP_NAME', 'EquityJournal')
         self.DEBUG_MODE = os.getenv('DEBUG_MODE', 'True').lower() == 'true'
+        self.UI_GLOW_PRESET = os.getenv('UI_GLOW_PRESET', 'medium').strip().lower()
     
     def is_ai_enabled(self):
         """Check if AI features are configured"""

@@ -18,6 +18,7 @@ from ui.alerts_view import AlertsView
 
 class InsightsView(QWidget):
     """AI insights focused on results and conference-call disclosures."""
+    MAX_GENERATION_CANDIDATES = 30
 
     def __init__(self, db: DatabaseManager, alert_service: AlertService, ai_service: AISummaryService):
         super().__init__()
@@ -95,9 +96,9 @@ class InsightsView(QWidget):
         filings = self.db.get_user_filings(user_id=self.current_user_id, stock_id=stock_id, limit=800)
         return [f for f in filings if (f.get("category") in ("Results", "Earnings Call"))]
 
-    def _get_or_create_alert_for_filing(self, filing):
+    def _get_or_create_alert_for_filing(self, filing, existing_alerts=None):
         resolved_url = AlertsView.resolve_document_url(filing.get("pdf_link"))
-        existing = self.db.get_user_alerts(self.current_user_id)
+        existing = existing_alerts if existing_alerts is not None else self.db.get_user_alerts(self.current_user_id)
         for alert in existing:
             if (
                 alert.get("stock_id") == filing.get("stock_id")
@@ -112,6 +113,39 @@ class InsightsView(QWidget):
             details=filing.get("announcement_summary"),
             url=resolved_url
         )
+
+    @staticmethod
+    def _category_key(category: str) -> str:
+        value = (category or "").strip().lower()
+        if value == "results":
+            return "results"
+        if value == "earnings call":
+            return "earnings_call"
+        return ""
+
+    @staticmethod
+    def _sort_key_for_filing(filing: dict):
+        dt = filing.get("announcement_datetime") or filing.get("announcement_date") or ""
+        return str(dt)
+
+    def _select_generation_candidates(self, filings):
+        """Pick latest Results + Earnings Call filings per portfolio stock."""
+        sorted_rows = sorted(filings, key=self._sort_key_for_filing, reverse=True)
+        selected = []
+        seen = set()
+        for filing in sorted_rows:
+            category_key = self._category_key(filing.get("category"))
+            stock_id = filing.get("stock_id")
+            if not stock_id or not category_key:
+                continue
+            bucket = (stock_id, category_key)
+            if bucket in seen:
+                continue
+            seen.add(bucket)
+            selected.append(filing)
+            if len(selected) >= self.MAX_GENERATION_CANDIDATES:
+                break
+        return selected
 
     def load_insights(self):
         self.table.setRowCount(0)
@@ -164,9 +198,11 @@ class InsightsView(QWidget):
             return
 
         filings = self._get_filtered_filings()
+        candidates = self._select_generation_candidates(filings)
+        existing_alerts = self.db.get_user_alerts(self.current_user_id)
         generated = 0
-        for filing in filings:
-            alert_id = self._get_or_create_alert_for_filing(filing)
+        for filing in candidates:
+            alert_id = self._get_or_create_alert_for_filing(filing, existing_alerts=existing_alerts)
             if self.db.get_alert_summary(alert_id):
                 continue
 
@@ -189,4 +225,8 @@ class InsightsView(QWidget):
             generated += 1
 
         self.load_insights()
-        QMessageBox.information(self, "Insights", f"Generated {generated} new AI insight(s).")
+        QMessageBox.information(
+            self,
+            "Insights",
+            f"Generated {generated} new AI insight(s) from {len(candidates)} latest portfolio filing candidates."
+        )

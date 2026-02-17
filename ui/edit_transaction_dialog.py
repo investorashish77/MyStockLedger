@@ -14,6 +14,7 @@ class EditTransactionDialog(QDialog):
         self.transaction_data = None
         
         self.setup_ui()
+        self._apply_active_theme()
         self.load_transaction_data()
     
     def setup_ui(self):
@@ -77,19 +78,16 @@ class EditTransactionDialog(QDialog):
         
         save_btn = QPushButton("Save Changes")
         save_btn.clicked.connect(self.save_changes)
-        save_btn.setStyleSheet('''
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                padding: 10px 20px;
-                border: none;
-                border-radius: 4px;
-            }
-        ''')
+        save_btn.setStyleSheet("font-weight: 700;")
         btn_layout.addWidget(save_btn)
         
         layout.addLayout(btn_layout)
         self.setLayout(layout)
+
+    def _apply_active_theme(self):
+        win = self.parent().window() if self.parent() else None
+        if win and hasattr(win, "styleSheet"):
+            self.setStyleSheet(win.styleSheet())
     
     def load_transaction_data(self):
         '''Load existing transaction data'''

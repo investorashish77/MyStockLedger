@@ -39,6 +39,7 @@ class AddStockDialog(QDialog):
         self.symbol_completer.setFilterMode(Qt.MatchContains)
         
         self.setup_ui()
+        self._apply_active_theme()
     
     def setup_ui(self):
         """Setup UI"""
@@ -144,21 +145,16 @@ class AddStockDialog(QDialog):
         
         add_btn = QPushButton("Add to Portfolio")
         add_btn.clicked.connect(self.add_stock)
-        add_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                padding: 10px 20px;
-                border: none;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-        """)
+        add_btn.setStyleSheet("font-weight: 700;")
         buttons.addWidget(add_btn)
         
         layout.addLayout(buttons)
+
+    def _apply_active_theme(self):
+        """Inherit currently active theme from main window."""
+        win = self.parent().window() if self.parent() else None
+        if win and hasattr(win, "styleSheet"):
+            self.setStyleSheet(win.styleSheet())
     
     def on_symbol_changed(self, text):
         """Debounce symbol lookup when input changes."""

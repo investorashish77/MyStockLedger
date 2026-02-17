@@ -5,56 +5,109 @@ Modern overview with KPI cards, trend signal, portfolio snapshot, and recent fil
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QTableWidget,
-    QTableWidgetItem, QHeaderView, QListWidget, QListWidgetItem, QPushButton
+    QTableWidgetItem, QHeaderView, QPushButton, QDialog, QTextEdit, QDialogButtonBox,
+    QGraphicsDropShadowEffect
 )
-from PyQt5.QtGui import QFont, QColor
+from PyQt5.QtGui import QFont, QColor, QPainter, QPen, QPainterPath, QLinearGradient
+from PyQt5.QtCore import Qt
 
 from database.db_manager import DatabaseManager
 from services.stock_service import StockService
+from utils.config import config
+
+
+class PerformanceLineChart(QWidget):
+    """Simple line chart widget for portfolio trend visualization."""
+
+    def __init__(self):
+        super().__init__()
+        self.values = []
+        self.setMinimumHeight(170)
+
+    def set_values(self, values):
+        self.values = [float(v) for v in values if v is not None]
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(8, 8, -8, -8)
+        painter.setPen(QPen(QColor("#6B7788"), 1, Qt.DotLine))
+        painter.drawRect(rect)
+
+        if len(self.values) < 2:
+            painter.setPen(QPen(QColor("#8FA4BD"), 1))
+            painter.drawText(rect.adjusted(8, 8, -8, -8), Qt.AlignCenter, "No trend data")
+            return
+
+        low = min(self.values)
+        high = max(self.values)
+        span = high - low or 1.0
+        step_x = rect.width() / (len(self.values) - 1)
+
+        path = QPainterPath()
+        for i, value in enumerate(self.values):
+            x = rect.left() + i * step_x
+            y = rect.bottom() - ((value - low) / span) * rect.height()
+            if i == 0:
+                path.moveTo(x, y)
+            else:
+                path.lineTo(x, y)
+
+        fill_path = QPainterPath(path)
+        fill_path.lineTo(rect.right(), rect.bottom())
+        fill_path.lineTo(rect.left(), rect.bottom())
+        fill_path.closeSubpath()
+
+        gradient = QLinearGradient(rect.left(), rect.top(), rect.left(), rect.bottom())
+        gradient.setColorAt(0.0, QColor(61, 90, 254, 90))
+        gradient.setColorAt(1.0, QColor(61, 90, 254, 10))
+        painter.fillPath(fill_path, gradient)
+
+        painter.setPen(QPen(QColor("#4F8DF0"), 2.2))
+        painter.drawPath(path)
 
 
 class DashboardView(QWidget):
     """Overview dashboard for key portfolio and filings insights."""
 
-    def __init__(self, db: DatabaseManager, stock_service: StockService):
+    def __init__(self, db: DatabaseManager, stock_service: StockService, show_kpis: bool = True):
         super().__init__()
         self.db = db
         self.stock_service = stock_service
+        self.show_kpis = show_kpis
         self.current_user_id = None
         self.current_range = "weekly"
+        self.current_notes = []
         self.setup_ui()
 
     def setup_ui(self):
         layout = QVBoxLayout()
         self.setLayout(layout)
 
-        title_row = QHBoxLayout()
-        title = QLabel("Dashboard")
-        font = QFont()
-        font.setPointSize(18)
-        font.setBold(True)
-        title.setFont(font)
-        title_row.addWidget(title)
-        title_row.addStretch()
-        self.sync_hint = QLabel("Live overview")
-        title_row.addWidget(self.sync_hint)
-        layout.addLayout(title_row)
-
-        cards = QHBoxLayout()
-        self.daily_card = self._build_card("Daily Gain/Loss")
-        self.weekly_card = self._build_card("Weekly Gain/Loss")
-        self.overall_card = self._build_card("Total Returns")
-        cards.addWidget(self.daily_card)
-        cards.addWidget(self.weekly_card)
-        cards.addWidget(self.overall_card)
-        layout.addLayout(cards)
+        if self.show_kpis:
+            cards = QHBoxLayout()
+            self.daily_card = self._build_card("Daily Gain/Loss")
+            self.weekly_card = self._build_card("Weekly Gain/Loss")
+            self.overall_card = self._build_card("Total Returns")
+            cards.addWidget(self.daily_card)
+            cards.addWidget(self.weekly_card)
+            cards.addWidget(self.overall_card)
+            layout.addLayout(cards)
 
         middle = QHBoxLayout()
-        left = QFrame()
-        left.setObjectName("dashPanel")
-        left_layout = QVBoxLayout()
-        left.setLayout(left_layout)
-        left_layout.addWidget(QLabel("Portfolio Trend Signal"))
+        chart_panel = QFrame()
+        chart_panel.setObjectName("dashPanel")
+        self.chart_panel = chart_panel
+        chart_layout = QVBoxLayout()
+        chart_panel.setLayout(chart_layout)
+        chart_title = QLabel("PORTFOLIO PERFORMANCE CHART")
+        title_font = QFont()
+        title_font.setPointSize(13)
+        title_font.setBold(True)
+        chart_title.setFont(title_font)
+        chart_layout.addWidget(chart_title)
         range_row = QHBoxLayout()
         self.daily_btn = QPushButton("Daily")
         self.weekly_btn = QPushButton("Weekly")
@@ -66,34 +119,50 @@ class DashboardView(QWidget):
         range_row.addWidget(self.weekly_btn)
         range_row.addWidget(self.all_time_btn)
         range_row.addStretch()
-        left_layout.addLayout(range_row)
-        self.trend_label = QLabel("No data")
+        chart_layout.addLayout(range_row)
+        self.trend_label = QLabel("No trend data")
         self.trend_label.setObjectName("trendLabel")
-        left_layout.addWidget(self.trend_label)
-        left_layout.addWidget(QLabel("Top Holdings Snapshot"))
+        self.chart = PerformanceLineChart()
+        chart_layout.addWidget(self.chart)
+        chart_layout.addWidget(self.trend_label)
+        middle.addWidget(chart_panel, 2)
+
+        holdings_panel = QFrame()
+        holdings_panel.setObjectName("dashPanel")
+        self.holdings_panel = holdings_panel
+        holdings_layout = QVBoxLayout()
+        holdings_panel.setLayout(holdings_layout)
+        holdings_layout.addWidget(QLabel("My Holdings"))
         self.holdings_table = QTableWidget()
-        self.holdings_table.setColumnCount(3)
-        self.holdings_table.setHorizontalHeaderLabels(["Asset", "Current Price", "P&L"])
+        self.holdings_table.setColumnCount(2)
+        self.holdings_table.setHorizontalHeaderLabels(["Asset", "P&L"])
         h = self.holdings_table.horizontalHeader()
         h.setSectionResizeMode(0, QHeaderView.Stretch)
-        self.holdings_table.setMaximumHeight(230)
-        left_layout.addWidget(self.holdings_table)
-        middle.addWidget(left, 3)
-
-        right = QFrame()
-        right.setObjectName("dashPanel")
-        right_layout = QVBoxLayout()
-        right.setLayout(right_layout)
-        right_header = QHBoxLayout()
-        right_header.addWidget(QLabel("Recent Filings"))
-        right_header.addStretch()
-        self.open_filings_btn = QPushButton("Open Filings")
-        right_header.addWidget(self.open_filings_btn)
-        right_layout.addLayout(right_header)
-        self.filings_list = QListWidget()
-        right_layout.addWidget(self.filings_list)
-        middle.addWidget(right, 2)
+        h.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.holdings_table.verticalHeader().setDefaultSectionSize(38)
+        holdings_layout.addWidget(self.holdings_table)
+        middle.addWidget(holdings_panel, 1)
         layout.addLayout(middle)
+
+        notes_panel = QFrame()
+        notes_panel.setObjectName("dashPanel")
+        self.notes_panel = notes_panel
+        notes_layout = QVBoxLayout()
+        notes_panel.setLayout(notes_layout)
+        notes_layout.addWidget(QLabel("Journal Notes"))
+        self.notes_table = QTableWidget()
+        self.notes_table.setColumnCount(3)
+        self.notes_table.setHorizontalHeaderLabels(["Symbol", "Date", "Note"])
+        self.notes_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.notes_table.verticalHeader().setDefaultSectionSize(46)
+        self.notes_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.notes_table.doubleClicked.connect(self._edit_selected_note)
+        notes_layout.addWidget(self.notes_table)
+        notes_hint = QLabel("Double-click a note row to edit and save.")
+        notes_hint.setObjectName("journalHint")
+        notes_layout.addWidget(notes_hint)
+        layout.addWidget(notes_panel)
+        self._apply_depth_effects()
 
     @staticmethod
     def _build_card(title: str):
@@ -114,17 +183,18 @@ class DashboardView(QWidget):
         card.setLayout(layout)
         return card
 
-    def load_dashboard(self, user_id: int):
+    def load_dashboard(self, user_id: int, use_live_quotes: bool = True):
         self.current_user_id = user_id
         portfolio = self.db.get_portfolio_summary(user_id)
         series_all = self.db.get_portfolio_performance_series(user_id=user_id)
-        self._render_portfolio_metrics(portfolio, series_all)
+        if self.show_kpis:
+            self._render_portfolio_metrics(portfolio, series_all, use_live_quotes=use_live_quotes)
         self._render_trend(series_all)
-        self._render_holdings_table(portfolio)
-        self._render_recent_filings(user_id)
+        self._render_holdings_table(portfolio, use_live_quotes=use_live_quotes)
+        self._render_journal_notes(user_id)
         self._update_range_buttons()
 
-    def _render_portfolio_metrics(self, portfolio, series_all):
+    def _render_portfolio_metrics(self, portfolio, series_all, use_live_quotes: bool = True):
         total_invested = 0.0
         total_current = 0.0
 
@@ -134,7 +204,9 @@ class DashboardView(QWidget):
             qty = row["quantity"]
             avg = row["avg_price"]
             qsym = self.stock_service.to_quote_symbol(symbol, exchange=exchange)
-            current = self.stock_service.get_current_price(qsym) or avg
+            current = self.db.get_latest_price(row["stock_id"]) or avg
+            if use_live_quotes:
+                current = self.stock_service.get_current_price(qsym) or current
             invested = avg * qty
             current_val = current * qty
             total_invested += invested
@@ -161,6 +233,7 @@ class DashboardView(QWidget):
 
     def _render_trend(self, series_all):
         if not series_all:
+            self.chart.set_values([])
             self.trend_label.setText("No trend data available (sync bhavcopy first).")
             return
         values = [row["portfolio_value"] for row in series_all]
@@ -170,45 +243,78 @@ class DashboardView(QWidget):
             selected = values[-7:] if len(values) >= 7 else values
         else:
             selected = values
-        self.trend_label.setText(self._sparkline(selected))
+        self.chart.set_values(selected)
+        if selected:
+            delta = selected[-1] - selected[0]
+            self.trend_label.setText(
+                f"{self.current_range.title()} trend | Last: ₹{selected[-1]:,.2f} | Change: ₹{delta:,.2f}"
+            )
+        else:
+            self.trend_label.setText("No trend data")
 
-    def _render_holdings_table(self, portfolio):
+    def _render_holdings_table(self, portfolio, use_live_quotes: bool = True):
         self.holdings_table.setRowCount(0)
-        enriched = self.db.get_user_stocks_with_symbol_master(self.current_user_id) if self.current_user_id else []
-        bse_by_symbol = {row["symbol"]: row.get("bse_code") for row in enriched}
         ranked = []
         for row in portfolio:
             symbol = row["symbol"]
-            bse_code = bse_by_symbol.get(symbol) or bse_by_symbol.get(symbol.replace(".NS", ""))
-            current = None
-            if bse_code:
-                series = self.db.get_bse_daily_prices(bse_code=bse_code, limit=1)
-                if series:
-                    current = series[-1]["close_price"]
-            if current is None:
-                qsym = self.stock_service.to_quote_symbol(symbol, exchange=row.get("exchange"))
-                current = self.stock_service.get_current_price(qsym) or row["avg_price"]
-            pnl = (current - row["avg_price"]) * row["quantity"]
-            ranked.append((symbol, current, pnl))
-        ranked.sort(key=lambda x: abs(x[2]), reverse=True)
-        for i, (symbol, current, pnl) in enumerate(ranked[:8]):
+            exchange = row.get("exchange")
+            avg_price = row["avg_price"]
+            quantity = row["quantity"]
+            quote_symbol = self.stock_service.to_quote_symbol(symbol, exchange=exchange)
+            current = self.db.get_latest_price(row["stock_id"]) or avg_price
+            if use_live_quotes:
+                live_price = self.stock_service.get_current_price(quote_symbol)
+                if live_price is not None:
+                    current = live_price
+                    self.db.save_price(row["stock_id"], current)
+            pnl = (current - avg_price) * quantity
+            ranked.append((symbol, pnl))
+        ranked.sort(key=lambda x: abs(x[1]), reverse=True)
+        for i, (symbol, pnl) in enumerate(ranked[:8]):
             self.holdings_table.insertRow(i)
             self.holdings_table.setItem(i, 0, QTableWidgetItem(symbol))
-            self.holdings_table.setItem(i, 1, QTableWidgetItem(f"₹{current:,.2f}"))
             pnl_item = QTableWidgetItem(f"₹{pnl:,.2f}")
             pnl_item.setForeground(QColor("#2E7D32" if pnl >= 0 else "#C62828"))
-            self.holdings_table.setItem(i, 2, pnl_item)
+            self.holdings_table.setItem(i, 1, pnl_item)
 
-    def _render_recent_filings(self, user_id: int):
-        self.filings_list.clear()
-        rows = self.db.get_user_filings(user_id=user_id, limit=15)
-        for filing in rows:
-            item = QListWidgetItem(
-                f"[{filing.get('category') or 'Update'}] {filing.get('symbol')} | "
-                f"{filing.get('announcement_date') or '-'}\n"
-                f"{(filing.get('headline') or '-')[:120]}"
-            )
-            self.filings_list.addItem(item)
+    def _render_journal_notes(self, user_id: int):
+        self.notes_table.setRowCount(0)
+        self.current_notes = self.db.get_user_journal_notes(user_id)
+        for i, row in enumerate(self.current_notes):
+            self.notes_table.insertRow(i)
+            symbol_item = QTableWidgetItem(row["symbol"])
+            symbol_item.setData(Qt.UserRole, row["transaction_id"])
+            self.notes_table.setItem(i, 0, symbol_item)
+            self.notes_table.setItem(i, 1, QTableWidgetItem(row.get("transaction_date") or "-"))
+            note_text = row.get("thesis") or ""
+            brief = note_text if len(note_text) <= 180 else f"{note_text[:177]}..."
+            note_item = QTableWidgetItem(brief)
+            note_item.setToolTip(note_text)
+            self.notes_table.setItem(i, 2, note_item)
+
+    def _edit_selected_note(self, index):
+        row = index.row()
+        if row < 0 or row >= len(self.current_notes):
+            return
+        note_row = self.current_notes[row]
+        transaction_id = note_row["transaction_id"]
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Edit Journal Note - {note_row['symbol']}")
+        dialog.resize(680, 420)
+        self._apply_active_theme(dialog)
+        root = QVBoxLayout(dialog)
+        editor = QTextEdit()
+        editor.setPlainText(note_row.get("thesis") or "")
+        root.addWidget(editor)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        root.addWidget(buttons)
+        if dialog.exec_() == QDialog.Accepted:
+            updated = editor.toPlainText().strip()
+            self.db.update_transaction(transaction_id, thesis=updated)
+            if self.current_user_id:
+                self._render_journal_notes(self.current_user_id)
 
     def set_range(self, range_key: str):
         self.current_range = range_key
@@ -230,19 +336,25 @@ class DashboardView(QWidget):
         card._sub.setText(f"{pct:+.2f}%")
         card._sub.setStyleSheet(f"color: {color};")
 
+    def _apply_depth_effects(self):
+        cfg = self._panel_shadow_preset()
+        for panel in (self.chart_panel, self.holdings_panel, self.notes_panel):
+            effect = QGraphicsDropShadowEffect()
+            effect.setBlurRadius(cfg["blur"])
+            effect.setOffset(0, cfg["offset"])
+            effect.setColor(QColor(0, 0, 0, cfg["alpha"]))
+            panel.setGraphicsEffect(effect)
+
     @staticmethod
-    def _sparkline(points):
-        if not points:
-            return "No trend data available"
-        points = [float(p) for p in points]
-        bars = "▁▂▃▄▅▆▇█"
-        low = min(points)
-        high = max(points)
-        if high - low < 1e-9:
-            return "Trend: " + (bars[3] * min(20, len(points))) + f"  | Value: ₹{points[-1]:,.2f}"
-        mapped = []
-        for p in points[-20:]:
-            idx = int((p - low) / (high - low) * (len(bars) - 1))
-            mapped.append(bars[max(0, min(idx, len(bars) - 1))])
-        change = points[-1] - points[0]
-        return "Trend: " + "".join(mapped) + f"  | Range Change: ₹{change:,.2f}"
+    def _panel_shadow_preset():
+        mapping = {
+            "subtle": {"blur": 16, "offset": 3, "alpha": 75},
+            "medium": {"blur": 26, "offset": 5, "alpha": 110},
+            "bold": {"blur": 36, "offset": 8, "alpha": 145},
+        }
+        return mapping.get(config.UI_GLOW_PRESET, mapping["medium"])
+
+    def _apply_active_theme(self, widget: QWidget):
+        win = self.window() if hasattr(self, "window") else None
+        if win and hasattr(win, "styleSheet"):
+            widget.setStyleSheet(win.styleSheet())

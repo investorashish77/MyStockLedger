@@ -2,10 +2,10 @@
 Login and Registration Dialog
 """
 
-from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
-                             QLineEdit, QPushButton, QMessageBox, QTabWidget, QWidget)
+from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+                             QLineEdit, QPushButton, QMessageBox, QTabWidget, QWidget, QFrame, QGraphicsDropShadowEffect)
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QFont, QPixmap
+from PyQt5.QtGui import QFont, QPixmap, QColor
 from pathlib import Path
 from database.db_manager import DatabaseManager
 from services.auth_service import AuthService
@@ -29,16 +29,65 @@ class LoginDialog(QDialog):
         """Setup the UI"""
         self.setWindowTitle(f"{config.APP_NAME} - Login")
         self.setFixedWidth(400)
-        
+        self.setObjectName("loginDialog")
+
         layout = QVBoxLayout()
+        self.setStyleSheet("""
+            QDialog {
+                background: qradialgradient(cx:0.5, cy:0.2, radius:1.2, stop:0 #1B2430, stop:0.6 #11161D, stop:1 #0B0F14);
+                color: #E2E8F0; font-family: "Roboto", "Segoe UI", sans-serif;
+            }
+            QFrame#loginCard {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #151D27, stop:1 #10161F);
+                border: 1px solid rgba(120,160,200,0.2);
+                border-radius: 16px;
+            }
+            QWidget {
+                background: transparent;
+                color: #DCE5EF;
+            }
+            QLabel { color: #DCE5EF; }
+            QLineEdit, QTextEdit {
+                background: #1B2531; color: #E2E8F0;
+                border: 1px solid #314255; border-radius: 8px; padding: 8px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #60A5FA;
+            }
+            QLineEdit::placeholder {
+                color: #8EA2B6;
+            }
+            QTabWidget::pane { border: 1px solid #2A394B; border-radius: 10px; background: #141C25; }
+            QTabBar::tab { background: #1A2430; color: #BFD0E3; padding: 8px 12px; border-top-left-radius: 8px; border-top-right-radius: 8px; }
+            QTabBar::tab:selected { background: #3D5AFE; color: white; }
+            QTabBar::tab:hover:!selected { background: #243445; color: #D8E4F1; }
+            QMessageBox {
+                background: #11161D;
+            }
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3D5AFE, stop:1 #60A5FA);
+                border: 1px solid #4D8FD2; border-radius: 8px; color: white; padding: 9px 12px; font-weight: 600;
+            }
+            QPushButton:hover { background: #3D5AFE; }
+        """)
+        card = QFrame()
+        card.setObjectName("loginCard")
+        card_layout = QVBoxLayout()
+        card_layout.setContentsMargins(16, 14, 16, 16)
+        card.setLayout(card_layout)
+        shadow = QGraphicsDropShadowEffect()
+        blur, offset, alpha = self._shadow_values()
+        shadow.setBlurRadius(blur)
+        shadow.setOffset(0, offset)
+        shadow.setColor(QColor(0, 0, 0, alpha))
+        card.setGraphicsEffect(shadow)
+        layout.addWidget(card)
 
         # Brand row
         brand_row = QHBoxLayout()
         logo = QLabel()
         images_dir = Path(__file__).resolve().parent.parent / "assets" / "images"
-        logo_path = images_dir / "equityjournal_logo_light.png"
-        if not logo_path.exists():
-            logo_path = images_dir / "logo_light_theme.png"
+        logo_path = images_dir / "logo_dark_theme.png"
         if logo_path.exists():
             logo.setPixmap(QPixmap(str(logo_path)).scaled(28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         brand_row.addStretch()
@@ -52,21 +101,30 @@ class LoginDialog(QDialog):
         title.setFont(title_font)
         brand_row.addWidget(title)
         brand_row.addStretch()
-        layout.addLayout(brand_row)
+        card_layout.addLayout(brand_row)
         
         # Subtitle
         subtitle = QLabel("Track your investments with AI-powered insights")
         subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setStyleSheet("color: #666; margin-bottom: 20px;")
-        layout.addWidget(subtitle)
+        subtitle.setStyleSheet("color: #9FB0C4; margin-bottom: 20px;")
+        card_layout.addWidget(subtitle)
         
         # Tab widget for Login/Register
         tabs = QTabWidget()
         tabs.addTab(self.create_login_tab(), "Login")
         tabs.addTab(self.create_register_tab(), "Register")
-        layout.addWidget(tabs)
+        card_layout.addWidget(tabs)
         
         self.setLayout(layout)
+
+    @staticmethod
+    def _shadow_values():
+        mapping = {
+            "subtle": (22, 4, 110),
+            "medium": (34, 8, 160),
+            "bold": (46, 10, 190),
+        }
+        return mapping.get(config.UI_GLOW_PRESET, mapping["medium"])
     
     def create_login_tab(self):
         """Create login tab"""
@@ -89,19 +147,6 @@ class LoginDialog(QDialog):
         # Login button
         login_btn = QPushButton("Login")
         login_btn.clicked.connect(self.handle_login)
-        login_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                padding: 10px;
-                border: none;
-                border-radius: 4px;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-        """)
         layout.addWidget(login_btn)
         
         layout.addStretch()
@@ -148,19 +193,6 @@ class LoginDialog(QDialog):
         # Register button
         register_btn = QPushButton("Create Account")
         register_btn.clicked.connect(self.handle_register)
-        register_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2196F3;
-                color: white;
-                padding: 10px;
-                border: none;
-                border-radius: 4px;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: #0b7dda;
-            }
-        """)
         layout.addWidget(register_btn)
         
         layout.addStretch()
