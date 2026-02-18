@@ -5,7 +5,7 @@ The main application window with portfolio, alerts, and settings
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QStackedWidget, QLabel, QPushButton, QMessageBox,
-                             QStatusBar, QMenuBar, QMenu, QAction, QDialog, QFrame, QCheckBox, QGraphicsDropShadowEffect)
+                             QStatusBar, QMenuBar, QMenu, QAction, QDialog, QFrame, QSlider, QGraphicsDropShadowEffect)
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QPixmap, QIcon, QColor
 from pathlib import Path
@@ -40,7 +40,7 @@ class MainWindow(QMainWindow):
         
         # User data
         self.current_user = None
-        self.current_theme = "light"
+        self.current_theme = "dark"
         self._is_refreshing = False
         
         # Setup UI
@@ -252,14 +252,19 @@ class MainWindow(QMainWindow):
         
         layout.addStretch()
         
-        self.theme_label = QLabel("Light Theme")
+        self.theme_label = QLabel("Dark Theme")
         self.theme_label.setObjectName("themeLabel")
         layout.addWidget(self.theme_label)
 
-        self.theme_toggle = QCheckBox()
+        self.theme_toggle = QSlider(Qt.Horizontal)
+        self.theme_toggle.setRange(0, 1)
+        self.theme_toggle.setPageStep(1)
+        self.theme_toggle.setSingleStep(1)
+        self.theme_toggle.setFixedWidth(58)
+        self.theme_toggle.setFixedHeight(30)
         self.theme_toggle.setObjectName("themeToggle")
-        self.theme_toggle.toggled.connect(self.toggle_theme)
-        self.theme_toggle.setChecked(False)
+        self.theme_toggle.valueChanged.connect(self.toggle_theme)
+        self.theme_toggle.setValue(1)
         layout.addWidget(self.theme_toggle)
         
         # AI status indicator
@@ -517,15 +522,19 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(css)
         self._apply_branding_for_theme()
         is_dark = self.current_theme == "dark"
-        self.theme_label.setText("Dark Theme" if is_dark else "Light Theme")
-        if self.theme_toggle.isChecked() != is_dark:
+        self.theme_label.setText("Dark Theme")
+        current_val = self.theme_toggle.value()
+        target_val = 1 if is_dark else 0
+        if current_val != target_val:
             self.theme_toggle.blockSignals(True)
-            self.theme_toggle.setChecked(is_dark)
+            self.theme_toggle.setValue(target_val)
             self.theme_toggle.blockSignals(False)
 
     def toggle_theme(self, checked=False):
         if isinstance(checked, bool):
             self.current_theme = "dark" if checked else "light"
+        elif isinstance(checked, int):
+            self.current_theme = "dark" if checked == 1 else "light"
         else:
             self.current_theme = "dark" if self.current_theme == "light" else "light"
         self.apply_theme()

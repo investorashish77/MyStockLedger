@@ -80,27 +80,37 @@ QLabel#themeLabel {
     font-weight: 600;
 }
 
-QCheckBox#themeToggle {
-    spacing: 0px;
+QSlider#themeToggle {
     min-width: 58px;
     max-width: 58px;
+    min-height: 30px;
+    max-height: 30px;
 }
 
-QCheckBox#themeToggle::indicator {
+QSlider#themeToggle::groove:horizontal {
     width: 58px;
     height: 30px;
     border-radius: 15px;
     background: #2D5A88;
+    border: 1px solid #4B6680;
 }
 
-QCheckBox#themeToggle::indicator:unchecked {
-    image: none;
+QSlider#themeToggle::sub-page:horizontal {
     background: #2D5A88;
+    border-radius: 15px;
 }
 
-QCheckBox#themeToggle::indicator:checked {
-    image: none;
+QSlider#themeToggle::add-page:horizontal {
     background: #1F2A36;
+    border-radius: 15px;
+}
+
+QSlider#themeToggle::handle:horizontal {
+    background: #FFFFFF;
+    width: 22px;
+    margin: 3px;
+    border-radius: 11px;
+    border: 1px solid #9EB0C1;
 }
 
 QStackedWidget#contentStack {
@@ -134,6 +144,27 @@ QComboBox {
     border: 1px solid #C9D5E1;
     border-radius: 7px;
     padding: 5px 8px;
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: 18px;
+    background: transparent;
+}
+
+QComboBox::down-arrow {
+    image: none;
+    width: 0;
+    height: 0;
+}
+
+QComboBox QAbstractItemView {
+    background: #FFFFFF;
+    color: #1F2A36;
+    border: 1px solid #C9D5E1;
+    selection-background-color: #3D5AFE;
+    selection-color: #FFFFFF;
+    outline: 0;
 }
 
 QTableWidget {
