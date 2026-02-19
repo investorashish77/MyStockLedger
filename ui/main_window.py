@@ -102,7 +102,7 @@ class MainWindow(QMainWindow):
         shell.addWidget(self.content_stack, 1)
 
         # Create views
-        self.dashboard_view = DashboardView(self.db, self.stock_service, show_kpis=False)
+        self.dashboard_view = DashboardView(self.db, self.stock_service, self.ai_service, show_kpis=False)
         self.portfolio_view = PortfolioView(self.db, self.stock_service)
         self.alerts_view = AlertsView(self.db, self.alert_service, self.ai_service)
         self.insights_view = InsightsView(self.db, self.alert_service, self.ai_service)
@@ -310,6 +310,7 @@ class MainWindow(QMainWindow):
         self.welcome_label.setText(f"Welcome, {user_data['name']}! 👋")
         self.logger.info("Login successful for user_id=%s", user_data.get("user_id"))
         self.status_bar.showMessage(f"Logged in as {user_data['name']}", 3000)
+        QTimer.singleShot(1800, self._run_daily_watchman_if_due)
 
     def _schedule_post_login_refresh(self):
         """Run a fast refresh first, then a live-price refresh after UI is visible."""
@@ -325,6 +326,24 @@ class MainWindow(QMainWindow):
             use_live_quotes=True,
             reason="startup-live"
         ))
+
+    def _run_daily_watchman_if_due(self):
+        """Trigger daily quarter-insight generation on first login of day."""
+        if not self.current_user:
+            return
+        try:
+            result = self.insights_view.watchman.run_daily_if_due(self.current_user["user_id"])
+            if not result:
+                self.logger.info("Watchman daily run skipped: already executed today.")
+                return
+            self.logger.info("Watchman daily run result: %s", result)
+            self.insights_view.load_for_user(self.current_user["user_id"])
+            self.status_bar.showMessage(
+                f"Insights updated: +{result['generated']} (missing:{result['not_available']}, failed:{result['failed']})",
+                5000
+            )
+        except Exception as exc:
+            self.logger.error("Daily watchman run failed: %s", exc)
     
     def refresh_all(self, sync_announcements: bool = False, use_live_quotes: bool = True, reason: str = "manual"):
         """Refresh all data"""

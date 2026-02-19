@@ -37,6 +37,14 @@ class Config:
             'BSE_API_ENDPOINT',
             'https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w'
         )
+        self.BSE_ATTACH_PRIMARY_BASE = os.getenv(
+            'BSE_ATTACH_PRIMARY_BASE',
+            'https://www.bseindia.com/xml-data/corpfiling/AttachLive/'
+        ).strip()
+        self.BSE_ATTACH_SECONDARY_BASE = os.getenv(
+            'BSE_ATTACH_SECONDARY_BASE',
+            'https://www.bseindia.com/xml-data/corpfiling/AttachHis/'
+        ).strip()
         self.BSE_HISTORY_START_DATE = os.getenv('BSE_HISTORY_START_DATE', '20260101')
         self.BSE_API_MAX_PAGES = int(os.getenv('BSE_API_MAX_PAGES', '200'))
         
@@ -44,6 +52,7 @@ class Config:
         self.APP_NAME = os.getenv('APP_NAME', 'EquityJournal')
         self.DEBUG_MODE = os.getenv('DEBUG_MODE', 'True').lower() == 'true'
         self.UI_GLOW_PRESET = os.getenv('UI_GLOW_PRESET', 'medium').strip().lower()
+        self.ENABLE_ADMIN_REGENERATE = os.getenv('ENABLE_ADMIN_REGENERATE', 'true').lower() == 'true'
     
     def is_ai_enabled(self):
         """Check if AI features are configured"""

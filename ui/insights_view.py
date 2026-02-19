@@ -1,6 +1,6 @@
 """
 Insights View
-Shows AI summaries for Results and Earnings Call categories.
+Quarter-specific Result + Concall snapshots for portfolio stocks.
 """
 
 from PyQt5.QtWidgets import (
@@ -12,22 +12,25 @@ from PyQt5.QtGui import QFont
 from database.db_manager import DatabaseManager
 from services.ai_summary_service import AISummaryService
 from services.alert_service import AlertService
+from services.watchman_service import WatchmanService
 from ui.summary_dialog import SummaryDialog
-from ui.alerts_view import AlertsView
+from utils.config import config
 
 
 class InsightsView(QWidget):
-    """AI insights focused on results and conference-call disclosures."""
-    MAX_GENERATION_CANDIDATES = 30
+    """Quarter-based insights focused on Results and Earnings Call only."""
 
     def __init__(self, db: DatabaseManager, alert_service: AlertService, ai_service: AISummaryService):
         super().__init__()
         self.db = db
         self.alert_service = alert_service
         self.ai_service = ai_service
+        self.watchman = WatchmanService(db, ai_service)
         self.current_user_id = None
         self.rows = []
+        self.all_rows = []
         self.stock_filter_map = {}
+        self.quarter_filter_value_map = {}
         self.setup_ui()
 
     def setup_ui(self):
@@ -44,9 +47,14 @@ class InsightsView(QWidget):
         header.addStretch()
 
         self.stock_filter = QComboBox()
-        self.stock_filter.currentIndexChanged.connect(self.load_insights)
+        self.stock_filter.currentIndexChanged.connect(self._on_filter_change)
         header.addWidget(QLabel("Company:"))
         header.addWidget(self.stock_filter)
+
+        self.quarter_filter = QComboBox()
+        self.quarter_filter.currentIndexChanged.connect(self._on_filter_change)
+        header.addWidget(QLabel("Quarter:"))
+        header.addWidget(self.quarter_filter)
 
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self.load_insights)
@@ -55,16 +63,22 @@ class InsightsView(QWidget):
         gen_btn = QPushButton("Generate Missing")
         gen_btn.clicked.connect(self.generate_missing_summaries)
         header.addWidget(gen_btn)
+
+        regen_btn = QPushButton("Regenerate (Admin)")
+        regen_btn.clicked.connect(self.regenerate_summaries_admin)
+        regen_btn.setVisible(config.ENABLE_ADMIN_REGENERATE)
+        self.regen_btn = regen_btn
+        header.addWidget(regen_btn)
         layout.addLayout(header)
 
         self.table = QTableWidget()
         self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels([
-            "Category", "Company", "Date", "Summary (Brief)", "Sentiment", "View"
+            "Quarter", "Insight", "Company", "Updated", "Summary (Brief)", "View"
         ])
         h = self.table.horizontalHeader()
-        h.setSectionResizeMode(1, QHeaderView.Stretch)
-        h.setSectionResizeMode(3, QHeaderView.Stretch)
+        h.setSectionResizeMode(2, QHeaderView.Stretch)
+        h.setSectionResizeMode(4, QHeaderView.Stretch)
         layout.addWidget(self.table)
 
         self.info_label = QLabel()
@@ -73,6 +87,7 @@ class InsightsView(QWidget):
     def load_for_user(self, user_id: int):
         self.current_user_id = user_id
         self._load_stock_filter_options(user_id)
+        self._load_quarter_filter_options(user_id)
         self.load_insights()
 
     def _load_stock_filter_options(self, user_id: int):
@@ -87,105 +102,125 @@ class InsightsView(QWidget):
             self.stock_filter.addItem(label)
         self.stock_filter.blockSignals(False)
 
-    def _get_filtered_filings(self):
-        if not self.current_user_id:
-            return []
-        stock_id = self.stock_filter_map.get(self.stock_filter.currentText())
-        if stock_id == "ALL":
-            stock_id = None
-        filings = self.db.get_user_filings(user_id=self.current_user_id, stock_id=stock_id, limit=800)
-        return [f for f in filings if (f.get("category") in ("Results", "Earnings Call"))]
-
-    def _get_or_create_alert_for_filing(self, filing, existing_alerts=None):
-        resolved_url = AlertsView.resolve_document_url(filing.get("pdf_link"))
-        existing = existing_alerts if existing_alerts is not None else self.db.get_user_alerts(self.current_user_id)
-        for alert in existing:
-            if (
-                alert.get("stock_id") == filing.get("stock_id")
-                and alert.get("announcement_url") == resolved_url
-                and (alert.get("alert_message") or "") == (filing.get("headline") or "")
-            ):
-                return alert["alert_id"]
-        return self.alert_service.create_manual_alert(
-            stock_id=filing["stock_id"],
-            alert_type="ANNOUNCEMENT",
-            message=filing.get("headline") or "Filing",
-            details=filing.get("announcement_summary"),
-            url=resolved_url
+    def _load_quarter_filter_options(self, user_id: int):
+        snapshots = self.db.get_user_insight_snapshots(user_id, limit=1000)
+        usable_snapshots = []
+        for row in snapshots:
+            status = (row.get("status") or "").upper()
+            summary_text = (row.get("summary_text") or "").strip().lower()
+            if status in {"NOT_AVAILABLE", "FAILED"}:
+                continue
+            if summary_text == "not available for this quarter.":
+                continue
+            usable_snapshots.append(row)
+        quarter_labels = sorted(
+            {row.get("quarter_label") for row in usable_snapshots if row.get("quarter_label")},
+            key=self._quarter_sort_key,
+            reverse=True,
         )
+        self.quarter_filter.blockSignals(True)
+        self.quarter_filter.clear()
+        self.quarter_filter_value_map = {"Latest Quarter": "LATEST", "All Quarters": "ALL"}
+        self.quarter_filter.addItem("Latest Quarter")
+        self.quarter_filter.addItem("All Quarters")
+        for q in quarter_labels:
+            self.quarter_filter_value_map[q] = q
+            self.quarter_filter.addItem(q)
+        self.quarter_filter.blockSignals(False)
 
-    @staticmethod
-    def _category_key(category: str) -> str:
-        value = (category or "").strip().lower()
-        if value == "results":
-            return "results"
-        if value == "earnings call":
-            return "earnings_call"
-        return ""
-
-    @staticmethod
-    def _sort_key_for_filing(filing: dict):
-        dt = filing.get("announcement_datetime") or filing.get("announcement_date") or ""
-        return str(dt)
-
-    def _select_generation_candidates(self, filings):
-        """Pick latest Results + Earnings Call filings per portfolio stock."""
-        sorted_rows = sorted(filings, key=self._sort_key_for_filing, reverse=True)
-        selected = []
-        seen = set()
-        for filing in sorted_rows:
-            category_key = self._category_key(filing.get("category"))
-            stock_id = filing.get("stock_id")
-            if not stock_id or not category_key:
-                continue
-            bucket = (stock_id, category_key)
-            if bucket in seen:
-                continue
-            seen.add(bucket)
-            selected.append(filing)
-            if len(selected) >= self.MAX_GENERATION_CANDIDATES:
-                break
-        return selected
+    def _on_filter_change(self):
+        self.load_insights()
 
     def load_insights(self):
         self.table.setRowCount(0)
         if not self.current_user_id:
             return
-        filings = self._get_filtered_filings()
-        self.rows = []
-        for filing in filings:
-            alert_id = self._get_or_create_alert_for_filing(filing)
-            ai_row = self.db.get_alert_summary(alert_id)
-            if not ai_row:
+        selected_stock_id = self.stock_filter_map.get(self.stock_filter.currentText())
+        if selected_stock_id == "ALL":
+            selected_stock_id = None
+        selected_quarter = self.quarter_filter_value_map.get(self.quarter_filter.currentText(), "LATEST")
+        snapshots = self.db.get_user_insight_snapshots(self.current_user_id, limit=1000)
+        self.all_rows = []
+        for row in snapshots:
+            if selected_stock_id is not None and row.get("stock_id") != selected_stock_id:
                 continue
-            self.rows.append((filing, alert_id, ai_row))
+            self.all_rows.append(row)
 
-        for i, (filing, alert_id, ai_row) in enumerate(self.rows):
+        latest_quarter = None
+        available_quarters = [r.get("quarter_label") for r in self.all_rows if r.get("quarter_label")]
+        if available_quarters:
+            latest_quarter = sorted(set(available_quarters), key=self._quarter_sort_key, reverse=True)[0]
+
+        self.rows = []
+        for row in self.all_rows:
+            status = (row.get("status") or "").upper()
+            summary_text = (row.get("summary_text") or "").strip()
+            if status in {"NOT_AVAILABLE", "FAILED"}:
+                continue
+            if summary_text.lower() == "not available for this quarter.":
+                continue
+            if selected_quarter == "LATEST" and latest_quarter and row.get("quarter_label") != latest_quarter:
+                continue
+            if selected_quarter not in ("ALL", "LATEST") and row.get("quarter_label") != selected_quarter:
+                continue
+            self.rows.append(row)
+
+        for i, row in enumerate(self.rows):
             self.table.insertRow(i)
-            self.table.setItem(i, 0, QTableWidgetItem(filing.get("category") or "-"))
-            self.table.setItem(i, 1, QTableWidgetItem(filing.get("company_name") or filing.get("symbol") or "-"))
-            self.table.setItem(i, 2, QTableWidgetItem(filing.get("announcement_date") or "-"))
-            text = ai_row.get("summary_text") or "-"
+            quarter = row.get("quarter_label") or "-"
+            insight_type = row.get("insight_type")
+            insight_label = (
+                f"{quarter} Result Summary"
+                if insight_type == WatchmanService.INSIGHT_RESULT
+                else f"{quarter} Con Call Summary"
+            )
+            self.table.setItem(i, 0, QTableWidgetItem(quarter))
+            self.table.setItem(i, 1, QTableWidgetItem(insight_label))
+            self.table.setItem(i, 2, QTableWidgetItem(row.get("company_name") or row.get("symbol") or "-"))
+            self.table.setItem(i, 3, QTableWidgetItem(row.get("updated_at") or row.get("generated_at") or "-"))
+            text = row.get("summary_text") or "Not available for this quarter."
             brief = text if len(text) <= 220 else f"{text[:217]}..."
             item = QTableWidgetItem(brief)
             item.setToolTip(text)
-            self.table.setItem(i, 3, item)
-            self.table.setItem(i, 4, QTableWidgetItem(ai_row.get("sentiment") or "NEUTRAL"))
+            self.table.setItem(i, 4, item)
 
             btn = QPushButton("Open")
+            btn.setObjectName("actionBlendBtn")
             btn.clicked.connect(lambda checked, idx=i: self.open_summary_dialog(idx))
             self.table.setCellWidget(i, 5, btn)
 
-        self.info_label.setText(f"Showing {len(self.rows)} AI insight(s).")
+        self.info_label.setText(f"Showing {len(self.rows)} quarter insight snapshot(s).")
+
+    @staticmethod
+    def _quarter_sort_key(quarter_label: str):
+        if not quarter_label:
+            return (0, 0)
+        parts = quarter_label.strip().split()
+        if len(parts) != 2:
+            return (0, 0)
+        q_part, fy_part = parts
+        q_num = 0
+        if q_part.upper().startswith("Q"):
+            try:
+                q_num = int(q_part[1:])
+            except ValueError:
+                q_num = 0
+        fy_num = 0
+        if fy_part.upper().startswith("FY"):
+            try:
+                fy_num = int(fy_part[2:])
+            except ValueError:
+                fy_num = 0
+        return (fy_num, q_num)
 
     def open_summary_dialog(self, row_idx: int):
         if row_idx < 0 or row_idx >= len(self.rows):
             return
-        filing, alert_id, ai_row = self.rows[row_idx]
+        row = self.rows[row_idx]
         dialog = SummaryDialog(
-            stock_symbol=filing.get("symbol") or "",
-            summary_text=ai_row.get("summary_text") or "",
-            sentiment=ai_row.get("sentiment") or "NEUTRAL",
+            stock_symbol=row.get("symbol") or "",
+            summary_text=row.get("summary_text") or "",
+            sentiment=row.get("sentiment") or "NEUTRAL",
             parent=self
         )
         dialog.exec_()
@@ -197,36 +232,48 @@ class InsightsView(QWidget):
             QMessageBox.information(self, "AI Not Available", "Configure AI provider key first.")
             return
 
-        filings = self._get_filtered_filings()
-        candidates = self._select_generation_candidates(filings)
-        existing_alerts = self.db.get_user_alerts(self.current_user_id)
-        generated = 0
-        for filing in candidates:
-            alert_id = self._get_or_create_alert_for_filing(filing, existing_alerts=existing_alerts)
-            if self.db.get_alert_summary(alert_id):
-                continue
-
-            announcement_text = filing.get("announcement_summary") or filing.get("headline") or ""
-            document_url = AlertsView.resolve_document_url(filing.get("pdf_link"))
-            result = self.ai_service.generate_summary(
-                stock_symbol=filing.get("symbol") or "",
-                announcement_text=announcement_text,
-                announcement_type=filing.get("category") or "ANNOUNCEMENT",
-                document_url=document_url
-            )
-            if not result:
-                continue
-            self.db.save_ai_summary(
-                alert_id=alert_id,
-                summary_text=result.get("summary_text") or "",
-                sentiment=result.get("sentiment") or "NEUTRAL"
-            )
-            self.alert_service.mark_as_read(alert_id)
-            generated += 1
-
+        result = self.watchman.run_for_user(user_id=self.current_user_id, force_regenerate=False)
+        self._load_quarter_filter_options(self.current_user_id)
         self.load_insights()
         QMessageBox.information(
             self,
             "Insights",
-            f"Generated {generated} new AI insight(s) from {len(candidates)} latest portfolio filing candidates."
+            (
+                f"Generated: {result['generated']}\n"
+                f"Skipped existing: {result['skipped_existing']}\n"
+                f"Not available: {result['not_available']}\n"
+                f"Failed: {result['failed']}"
+            )
+        )
+
+    def regenerate_summaries_admin(self):
+        if not self.current_user_id:
+            return
+        if not config.ENABLE_ADMIN_REGENERATE:
+            QMessageBox.information(self, "Disabled", "Admin regenerate is disabled by configuration.")
+            return
+        if not self.ai_service.is_available():
+            QMessageBox.information(self, "AI Not Available", "Configure AI provider key first.")
+            return
+        reply = QMessageBox.question(
+            self,
+            "Admin Regenerate",
+            "Regenerate quarter insights for portfolio stocks?\nThis will overwrite existing snapshots.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        result = self.watchman.run_for_user(user_id=self.current_user_id, force_regenerate=True)
+        self._load_quarter_filter_options(self.current_user_id)
+        self.load_insights()
+        QMessageBox.information(
+            self,
+            "Admin Regenerate",
+            (
+                f"Generated: {result['generated']}\n"
+                f"Not available: {result['not_available']}\n"
+                f"Failed: {result['failed']}"
+            )
         )

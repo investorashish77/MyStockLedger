@@ -22,6 +22,7 @@ from services.symbol_master_service import SymbolMasterService
 from services.bse_feed_service import BSEFeedService
 from services.bse_bhavcopy_service import BSEBhavcopyService
 from services.nsetools_adapter import NSEToolsAdapter
+from services.watchman_service import WatchmanService
 
 
 class TestAuthService(unittest.TestCase):
@@ -365,6 +366,23 @@ class TestDatabaseManager(unittest.TestCase):
         self.assertEqual(series[1]["portfolio_value"], 1100.0)
         self.assertEqual(series[2]["portfolio_value"], 600.0)
 
+    def test_analyst_consensus_upsert_and_get(self):
+        user_id = self.db.create_user("9000011111", "Analyst User", "hash")
+        stock_id = self.db.add_stock(user_id, "INFY", "Infosys Ltd", "NSE")
+        consensus_id = self.db.upsert_analyst_consensus(
+            stock_id=stock_id,
+            report_text="Sample analyst consensus report",
+            status="GENERATED",
+            provider="groq",
+            as_of_date="2026-02-18",
+        )
+        self.assertIsNotNone(consensus_id)
+        row = self.db.get_analyst_consensus(stock_id)
+        self.assertIsNotNone(row)
+        self.assertEqual(row["status"], "GENERATED")
+        self.assertEqual(row["provider"], "groq")
+        self.assertIn("consensus", row["report_text"])
+
 
 class TestAlertService(unittest.TestCase):
     """Test alert service"""
@@ -643,6 +661,26 @@ class TestAISummaryService(unittest.TestCase):
         text = self.ai_service._extract_pdf_text_from_url("https://example.com/doc.pdf")
         self.assertIn("Revenue 1000", text)
 
+    @patch("services.ai_summary_service.PdfReader")
+    @patch("services.ai_summary_service.requests.get")
+    def test_extract_pdf_text_falls_back_to_secondary_link(self, mock_get, mock_pdf_reader):
+        page = MagicMock()
+        page.extract_text.return_value = "PAT 120 | EPS 4.2"
+        reader_instance = MagicMock()
+        reader_instance.pages = [page]
+        mock_pdf_reader.return_value = reader_instance
+
+        primary_fail = MagicMock()
+        primary_fail.raise_for_status.side_effect = Exception("404")
+        secondary_ok = MagicMock()
+        secondary_ok.content = b"%PDF-1.4 dummy"
+        secondary_ok.raise_for_status.return_value = None
+        mock_get.side_effect = [primary_fail, secondary_ok]
+
+        text = self.ai_service._extract_pdf_text_from_url("https://example.com/abcd-1234.pdf")
+        self.assertIn("PAT 120", text)
+        self.assertGreaterEqual(mock_get.call_count, 2)
+
 
 class TestResearchDataLayer(unittest.TestCase):
     """Test symbol master, financial schema operations, and BSE feed ingestion."""
@@ -891,6 +929,124 @@ class TestResearchDataLayer(unittest.TestCase):
         self.assertEqual(rows[0]["headline"], "RELIANCE quarterly results announced")
 
 
+class TestWatchmanService(unittest.TestCase):
+    def setUp(self):
+        self.db = DatabaseManager(":memory:")
+        self.user_id = self.db.create_user("9111111111", "Watchman User", "hash")
+        self.stock_id = self.db.add_stock(self.user_id, "GOODLUCK", "Goodluck India Limited", "NSE")
+        self.ai = MagicMock()
+        self.ai.provider = "test"
+        self.ai.generate_summary.return_value = {
+            "summary_text": "Result Summary\nRevenue: NA | YoY: NA | QoQ: NA",
+            "sentiment": "NEUTRAL",
+            "provider": "test",
+        }
+        self.watchman = WatchmanService(self.db, self.ai)
+
+    def _seed_filing(self, category: str, headline: str, dt: str, ref: str):
+        self.db.upsert_filing(
+            stock_id=self.stock_id,
+            symbol_id=None,
+            category=category,
+            headline=headline,
+            announcement_summary=headline,
+            announcement_date=dt,
+            pdf_link=f"https://example.com/{ref}.pdf",
+            source_exchange="BSE",
+            source_ref=ref,
+        )
+
+    def test_generates_two_snapshots_for_latest_quarter(self):
+        self._seed_filing("Results", "Q3 FY26 financial results", "2026-02-14", "res-q3")
+        self._seed_filing("Earnings Call", "Q3 FY26 conference call transcript", "2026-02-16", "cc-q3")
+        result = self.watchman.run_for_user(self.user_id, force_regenerate=False)
+        self.assertEqual(result["generated"], 2)
+
+        snapshots = self.db.get_user_insight_snapshots(self.user_id)
+        types = {s["insight_type"] for s in snapshots}
+        self.assertIn(WatchmanService.INSIGHT_RESULT, types)
+        self.assertIn(WatchmanService.INSIGHT_CONCALL, types)
+        self.assertTrue(all(s["quarter_label"] == "Q3 FY26" for s in snapshots))
+
+    def test_no_regeneration_when_snapshot_exists(self):
+        self._seed_filing("Results", "Q3 FY26 financial results", "2026-02-14", "res-q3")
+        self._seed_filing("Earnings Call", "Q3 FY26 conference call transcript", "2026-02-16", "cc-q3")
+        first = self.watchman.run_for_user(self.user_id, force_regenerate=False)
+        second = self.watchman.run_for_user(self.user_id, force_regenerate=False)
+        self.assertEqual(first["generated"], 2)
+        self.assertGreaterEqual(second["skipped_existing"], 2)
+
+    def test_daily_run_runs_once(self):
+        self._seed_filing("Results", "Q3 FY26 financial results", "2026-02-14", "res-q3")
+        self._seed_filing("Earnings Call", "Q3 FY26 conference call transcript", "2026-02-16", "cc-q3")
+        first = self.watchman.run_daily_if_due(self.user_id)
+        second = self.watchman.run_daily_if_due(self.user_id)
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+
+    def test_result_prefers_financial_result_over_call_notice(self):
+        self._seed_filing("Results", "Board meeting notice for conference call", "2026-02-12", "res-notice")
+        self._seed_filing("Results", "Q3 FY26 financial results standalone and consolidated", "2026-02-14", "res-final")
+        result = self.watchman.run_for_user(self.user_id, force_regenerate=False)
+        self.assertEqual(result["generated"], 1)
+
+        snapshot = self.db.get_insight_snapshot(self.stock_id, "Q3 FY26", WatchmanService.INSIGHT_RESULT)
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["source_ref"], "res-final")
+
+    def test_concall_skips_generic_notice_without_transcript_or_recording(self):
+        self._seed_filing("Earnings Call", "Investor call notice for Q3 FY26", "2026-02-15", "cc-notice")
+        result = self.watchman.run_for_user(self.user_id, force_regenerate=False)
+        self.assertEqual(result["generated"], 0)
+        self.assertEqual(result["not_available"], 2)
+
+        snapshot = self.db.get_insight_snapshot(self.stock_id, "Q3 FY26", WatchmanService.INSIGHT_CONCALL)
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["status"], "NOT_AVAILABLE")
+
+    def test_results_retries_next_candidate_when_first_summary_is_all_na(self):
+        self._seed_filing("Results", "Q3 FY26 financial results - short update", "2026-02-14", "res-short")
+        self._seed_filing("Results", "Q3 FY26 investor presentation with detailed financials", "2026-02-15", "res-ppt")
+        self._seed_filing("Earnings Call", "Q3 FY26 conference call transcript", "2026-02-16", "cc-q3")
+
+        self.ai.generate_summary.side_effect = [
+            {
+                "summary_text": (
+                    "Result Summary\n"
+                    "Revenue: NA | YoY: NA | QoQ: NA\n"
+                    "EBITDA: NA | YoY: NA | QoQ: NA\n"
+                    "PAT: NA | YoY: NA | QoQ: NA\n"
+                    "EPS: NA | YoY: NA | QoQ: NA\n"
+                ),
+                "sentiment": "NEUTRAL",
+                "provider": "test",
+            },
+            {
+                "summary_text": (
+                    "Result Summary\n"
+                    "Revenue: 100 | YoY: 10% | QoQ: 2%\n"
+                    "EBITDA: 20 | YoY: 8% | QoQ: 1%\n"
+                    "PAT: 10 | YoY: 5% | QoQ: 1%\n"
+                    "EPS: 3.2 | YoY: 4% | QoQ: 1%\n"
+                ),
+                "sentiment": "POSITIVE",
+                "provider": "test",
+            },
+            {
+                "summary_text": "Summary:\n- Good call insights.",
+                "sentiment": "NEUTRAL",
+                "provider": "test",
+            },
+        ]
+        result = self.watchman.run_for_user(self.user_id, force_regenerate=False)
+        self.assertEqual(result["generated"], 2)
+
+        snapshot = self.db.get_insight_snapshot(self.stock_id, "Q3 FY26", WatchmanService.INSIGHT_RESULT)
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["source_ref"], "res-ppt")
+        self.assertIn("Revenue: 100", snapshot["summary_text"])
+
+
 def run_tests():
     """Run all unit tests"""
     # Create test suite
@@ -904,6 +1060,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestAlertService))
     suite.addTests(loader.loadTestsFromTestCase(TestAISummaryService))
     suite.addTests(loader.loadTestsFromTestCase(TestResearchDataLayer))
+    suite.addTests(loader.loadTestsFromTestCase(TestWatchmanService))
     
     # Run tests
     runner = unittest.TextTestRunner(verbosity=2)

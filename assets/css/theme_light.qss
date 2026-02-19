@@ -75,6 +75,31 @@ QPushButton#navBtn:checked:hover {
     color: #FFFFFF;
 }
 
+QPushButton#actionBlendBtn {
+    text-align: center;
+    padding: 7px 12px;
+    border-radius: 10px;
+    background: #1F2A36;
+    border: 1px solid #2D3E50;
+    color: #E9F1FB;
+    font-weight: 600;
+}
+
+QPushButton#actionBlendBtn:hover {
+    background: #314557;
+    color: #FFFFFF;
+}
+
+QPushButton#actionBlendBtn:pressed {
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #3D5AFE,
+        stop:1 #60A5FA
+    );
+    border: 1px solid #4D8FD2;
+    color: #FFFFFF;
+}
+
 QLabel#themeLabel {
     color: #4A6074;
     font-weight: 600;

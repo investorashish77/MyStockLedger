@@ -184,6 +184,29 @@ CREATE TABLE IF NOT EXISTS filings (
 CREATE INDEX IF NOT EXISTS idx_filings_stock_date ON filings(stock_id, announcement_date);
 CREATE INDEX IF NOT EXISTS idx_filings_category ON filings(category, announcement_date);
 
+-- Quarter-specific portfolio insight snapshots (one per stock+quarter+insight type)
+CREATE TABLE IF NOT EXISTS insight_snapshots (
+    snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_id INTEGER NOT NULL,
+    quarter_label TEXT NOT NULL,           -- Example: Q3 FY26
+    insight_type TEXT NOT NULL,            -- RESULT_SUMMARY / CONCALL_SUMMARY
+    source_filing_id INTEGER,
+    source_ref TEXT,
+    summary_text TEXT,
+    sentiment TEXT,
+    status TEXT NOT NULL DEFAULT 'GENERATED', -- GENERATED / NOT_AVAILABLE / FAILED
+    provider TEXT,
+    model_version TEXT,
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (stock_id) REFERENCES stocks(stock_id),
+    FOREIGN KEY (source_filing_id) REFERENCES filings(filing_id),
+    UNIQUE(stock_id, quarter_label, insight_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_insight_snapshots_stock_quarter ON insight_snapshots(stock_id, quarter_label);
+CREATE INDEX IF NOT EXISTS idx_insight_snapshots_type ON insight_snapshots(insight_type, quarter_label);
+
 -- Generic app settings for sync cursors/feature flags
 CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
@@ -209,3 +232,18 @@ CREATE TABLE IF NOT EXISTS bse_daily_prices (
 );
 
 CREATE INDEX IF NOT EXISTS idx_bse_daily_prices_code_date ON bse_daily_prices(bse_code, trade_date);
+
+-- Analyst consensus snapshots (one latest report per stock)
+CREATE TABLE IF NOT EXISTS analyst_consensus (
+    consensus_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_id INTEGER NOT NULL UNIQUE,
+    report_text TEXT,
+    status TEXT NOT NULL DEFAULT 'GENERATED', -- GENERATED / FAILED
+    provider TEXT,
+    as_of_date DATE,
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (stock_id) REFERENCES stocks(stock_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_analyst_consensus_stock ON analyst_consensus(stock_id);

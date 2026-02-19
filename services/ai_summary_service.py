@@ -5,8 +5,10 @@ Supports multiple AI providers: Groq (free), Claude, OpenAI
 """
 
 import re
+from datetime import date
 from io import BytesIO
-from typing import Dict, Optional
+from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
 import requests
 from utils.config import config
@@ -104,36 +106,132 @@ class AISummaryService:
             self.logger.error("Error generating AI summary: %s", e)
             return None
 
+    def generate_analyst_consensus(
+        self,
+        company_name: str,
+        stock_symbol: str = "",
+        current_price: Optional[float] = None,
+        as_of_date: Optional[str] = None,
+    ) -> Optional[Dict]:
+        """Generate analyst consensus style report for one company."""
+        if not self.is_available():
+            return None
+
+        as_of = as_of_date or date.today().isoformat()
+        price_text = "NA" if current_price is None else f"{current_price:.2f}"
+        symbol_text = f" ({stock_symbol})" if stock_symbol else ""
+        prompt = f"""You are an experienced financial research analyst covering the Indian stock market.
+Provide consensus analyst view for company <<{company_name}{symbol_text}>> as of {as_of}.
+
+Output strictly in this format:
+{company_name} - Analyst Consensus (as of {as_of})
+| Metric | Value |
+|---|---|
+| Current price (Rs) | {price_text} |
+| Consensus price target | ... |
+| Price-target range (analysts) | ... |
+| 12-month price target | ... |
+| Buy/Sell rating | ... |
+
+Executive Summary (max 100 words): ...
+
+Rules:
+- Use concise factual language.
+- If unavailable, write NA.
+- No extra sections.
+"""
+        try:
+            if self.provider == 'groq':
+                return self._generate_groq_summary(prompt, max_tokens=260)
+            elif self.provider == 'claude':
+                return self._generate_claude_summary(prompt, max_tokens=260)
+            elif self.provider == 'openai':
+                return self._generate_openai_summary(prompt, max_tokens=260)
+        except Exception as e:
+            self.last_error = str(e)
+            self.logger.error("Error generating analyst consensus: %s", e)
+            return None
+
     def _extract_pdf_text_from_url(self, document_url: str, timeout: int = 20, max_chars: int = 24000) -> str:
         """Download PDF and extract text in-memory. Returns empty string on failure."""
-        if not document_url or not document_url.lower().endswith(".pdf"):
-            return ""
         if PdfReader is None:
             return ""
 
-        try:
-            response = requests.get(
-                document_url,
-                timeout=timeout,
-                headers={
-                    "User-Agent": "Mozilla/5.0",
-                    "Referer": "https://www.bseindia.com/",
-                },
-            )
-            response.raise_for_status()
-            pdf_bytes = BytesIO(response.content)
-            reader = PdfReader(pdf_bytes)
-            parts = []
-            for page in reader.pages[:12]:
-                page_text = (page.extract_text() or "").strip()
-                if page_text:
-                    parts.append(page_text)
-                if sum(len(p) for p in parts) >= max_chars:
-                    break
-            text = "\n".join(parts).strip()
-            return text[:max_chars]
-        except Exception:
+        for idx, url in enumerate(self._build_pdf_candidate_urls(document_url)):
+            try:
+                response = requests.get(
+                    url,
+                    timeout=timeout,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Referer": "https://www.bseindia.com/",
+                    },
+                )
+                response.raise_for_status()
+                pdf_bytes = BytesIO(response.content)
+                reader = PdfReader(pdf_bytes)
+                parts = []
+                for page in reader.pages[:12]:
+                    page_text = (page.extract_text() or "").strip()
+                    if page_text:
+                        parts.append(page_text)
+                    if sum(len(p) for p in parts) >= max_chars:
+                        break
+                text = "\n".join(parts).strip()
+                if text:
+                    if idx > 0:
+                        self.logger.info("PDF extraction succeeded using fallback URL: %s", url)
+                    return text[:max_chars]
+            except Exception:
+                continue
+        return ""
+
+    @staticmethod
+    def _extract_pdf_filename(value: str) -> str:
+        text = (value or "").strip()
+        if not text:
             return ""
+        parsed = urlparse(text)
+        candidate = parsed.path.split("/")[-1] if parsed.path else text.split("/")[-1]
+        candidate = candidate.split("?")[0].strip()
+        return candidate if candidate.lower().endswith(".pdf") else ""
+
+    @staticmethod
+    def _join_base_and_filename(base_url: str, filename: str) -> str:
+        base = (base_url or "").strip()
+        if not base or not filename:
+            return ""
+        if not base.endswith("/"):
+            base = f"{base}/"
+        return f"{base}{filename}"
+
+    def _build_pdf_candidate_urls(self, document_url: str) -> List[str]:
+        value = (document_url or "").strip()
+        if not value:
+            return []
+
+        filename = self._extract_pdf_filename(value)
+        candidates: List[str] = []
+
+        # Preferred order: configured primary, configured secondary, then provided URL.
+        if filename:
+            primary = self._join_base_and_filename(config.BSE_ATTACH_PRIMARY_BASE, filename)
+            secondary = self._join_base_and_filename(config.BSE_ATTACH_SECONDARY_BASE, filename)
+            if primary:
+                candidates.append(primary)
+            if secondary and secondary not in candidates:
+                candidates.append(secondary)
+
+        if value.startswith("http://") or value.startswith("https://"):
+            if value not in candidates:
+                candidates.append(value)
+        elif filename:
+            # Resolve relative path for robustness.
+            resolved = f"https://www.bseindia.com/{value.lstrip('/')}"
+            if resolved not in candidates:
+                candidates.append(resolved)
+
+        return candidates
 
     @classmethod
     def _normalize_api_key(cls, value: str) -> str:
@@ -146,15 +244,19 @@ class AISummaryService:
     def _create_prompt(self, stock_symbol: str, announcement_text: str, 
                       announcement_type: str) -> str:
         """Create the prompt for AI summary"""
-        if (announcement_type or "").strip().lower() != "results":
-            return self._create_non_results_prompt(stock_symbol, announcement_text, announcement_type)
+        ann_type = (announcement_type or "").strip().lower()
+        if ann_type == "results":
+            return self._create_results_prompt(stock_symbol, announcement_text, announcement_type)
+        if ann_type == "earnings call":
+            return self._create_earnings_call_prompt(stock_symbol, announcement_text, announcement_type)
 
-        return self._create_results_prompt(stock_symbol, announcement_text, announcement_type)
+        return self._create_non_results_prompt(stock_symbol, announcement_text, announcement_type)
 
     def _create_results_prompt(self, stock_symbol: str, announcement_text: str, announcement_type: str) -> str:
         """Prompt template for results filings with structured metrics extraction."""
         quick_metrics_hint = self._extract_quick_financial_metrics(announcement_text)
-        return f"""You are an advanced financial document analysis AI. Your task is to analyze the provided financial content for {stock_symbol} and generate a structured result summary.
+        return f"""You are an AI designed to generate concise summaries of quarterly results based on filings for {stock_symbol}.
+Your task is to create a structured summary that highlights the most important aspects of the filings without listing all similar filings.
 
 Input:
 - Announcement Type: {announcement_type}
@@ -175,11 +277,48 @@ Special Items: [Insert details or 'None highlighted']
 Additional Management Insights: [Summarize any commentary or insights shared by management in a professional tone.]
 
 Instructions:
-1. Extract financial data points for Revenue, EBITDA, PAT, and EPS with YoY and QoQ where available.
+1. Extract and summarize only key financial metrics from the current quarter.
 2. If a metric is not explicitly present, return 'NA'. Do not infer or invent numbers.
 3. Identify special items clearly (exceptional items, one-offs, guidance changes, notable wins/losses).
 4. Capture notable management commentary briefly and factually.
-5. Keep the response concise and structured exactly as requested."""
+5. Ensure clarity, conciseness, and focus on current quarter data only.
+6. Do not enumerate multiple similar filings."""
+
+    @staticmethod
+    def _create_earnings_call_prompt(stock_symbol: str, announcement_text: str, announcement_type: str) -> str:
+        """Prompt template for conference call analysis."""
+        return f"""You are an AI designed to generate concise summaries of conference call transcripts based on filings for {stock_symbol}.
+Your task is to create a structured summary that highlights the most important aspects of the filings without listing all similar filings.
+
+Input:
+- Announcement Type: {announcement_type}
+- Source Content (document URL and/or extracted text blob):
+{announcement_text}
+
+Output format (strict):
+Summary:
+- [One concise overall summary for quick scan]
+
+Management Commentary:
+- [Brief overview of management perspective on performance, challenges, strategy]
+
+Business Insights:
+- [Insights on business environment, market conditions, competitive landscape]
+
+Forward Guidance and Outlook:
+- [Guidance for upcoming quarters/fiscal year, growth/cost outlook, expectations]
+
+Risks:
+- [Key internal and external risks mentioned]
+
+Earnings Trigger:
+- [Potential positive triggers and expected timelines]
+
+Instructions:
+1. Keep output concise and structured.
+2. Focus on current quarter-relevant data only.
+3. If a section is not present in the source, write 'NA'.
+4. Avoid generic statements and avoid listing repetitive similar filings."""
 
     @staticmethod
     def _create_non_results_prompt(stock_symbol: str, announcement_text: str, announcement_type: str) -> str:
@@ -242,14 +381,14 @@ Rules:
         lines.append(f"Special hint: {(special_match.group(0).strip() if special_match else 'None')}")
         return "\n".join(lines)
     
-    def _generate_groq_summary(self, prompt: str) -> Dict:
+    def _generate_groq_summary(self, prompt: str, max_tokens: int = 500) -> Dict:
         """Generate summary using Groq"""
         response = self.client.chat.completions.create(
             model="llama-3.3-70b-versatile",  # Free tier model
             messages=[
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=500,
+            max_tokens=max_tokens,
             temperature=0.3
         )
         
@@ -262,11 +401,11 @@ Rules:
             'provider': 'groq'
         }
     
-    def _generate_claude_summary(self, prompt: str) -> Dict:
+    def _generate_claude_summary(self, prompt: str, max_tokens: int = 500) -> Dict:
         """Generate summary using Claude"""
         response = self.client.messages.create(
             model="claude-haiku-4-5-20251001",  # Most economical
-            max_tokens=500,
+            max_tokens=max_tokens,
             messages=[
                 {"role": "user", "content": prompt}
             ]
@@ -281,14 +420,14 @@ Rules:
             'provider': 'claude'
         }
     
-    def _generate_openai_summary(self, prompt: str) -> Dict:
+    def _generate_openai_summary(self, prompt: str, max_tokens: int = 500) -> Dict:
         """Generate summary using OpenAI"""
         response = self.client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=500,
+            max_tokens=max_tokens,
             temperature=0.3
         )
         

@@ -4,6 +4,7 @@ Shows important portfolio-specific corporate filings with document links and con
 """
 
 from datetime import datetime
+from urllib.parse import urlparse
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QMessageBox, QComboBox,
@@ -169,22 +170,54 @@ class AlertsView(QWidget):
         QDesktopServices.openUrl(QUrl(url))
 
     @staticmethod
-    def resolve_document_url(raw_value: str) -> str:
+    def _join_base_and_filename(base_url: str, filename: str) -> str:
+        base = (base_url or "").strip()
+        if not base:
+            return ""
+        if not base.endswith("/"):
+            base = f"{base}/"
+        return f"{base}{filename}"
+
+    @staticmethod
+    def _extract_pdf_filename(value: str) -> str:
+        text = (value or "").strip()
+        if not text:
+            return ""
+        parsed = urlparse(text)
+        candidate = parsed.path.split("/")[-1] if parsed.path else text.split("/")[-1]
+        candidate = candidate.split("?")[0].strip()
+        return candidate if candidate.lower().endswith(".pdf") else ""
+
+    @classmethod
+    def resolve_document_urls(cls, raw_value: str):
+        """
+        Resolve primary/alternate BSE filing links.
+        Primary uses AttachLive base; alternate uses AttachHis base.
+        """
         value = (raw_value or "").strip()
         if not value:
-            return ""
+            return "", ""
+
+        filename = cls._extract_pdf_filename(value)
+        if filename:
+            primary = cls._join_base_and_filename(config.BSE_ATTACH_PRIMARY_BASE, filename)
+            alternate = cls._join_base_and_filename(config.BSE_ATTACH_SECONDARY_BASE, filename)
+            # If raw absolute URL is not one of the configured canonical links, keep it as alternate.
+            if value.startswith("http://") or value.startswith("https://"):
+                if value not in {primary, alternate}:
+                    alternate = value
+            return primary, alternate
+
         if value.startswith("http://") or value.startswith("https://"):
-            return value
-        if value.lower().endswith(".pdf"):
-            filename = value.split("/")[-1]
-            return f"https://www.bseindia.com/xml-data/corpfiling/AttachHis/{filename}"
-        return f"https://www.bseindia.com/{value.lstrip('/')}"
+            return value, ""
+        return f"https://www.bseindia.com/{value.lstrip('/')}", ""
 
     def open_filing_details(self, row: int, column: int):
         if row < 0 or row >= len(self.current_filings):
             return
         filing = self.current_filings[row]
         summary = filing.get("announcement_summary") or filing.get("headline") or "-"
+        doc_url, alt_doc_url = self.resolve_document_urls(filing.get("pdf_link"))
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Filing Details - {filing.get('symbol')}")
         dialog.resize(860, 560)
@@ -197,6 +230,13 @@ class AlertsView(QWidget):
         )
         title.setWordWrap(True)
         layout.addWidget(title)
+        if doc_url:
+            links = [f'<a href="{doc_url}">Open Document (Primary)</a>']
+            if alt_doc_url:
+                links.append(f'<a href="{alt_doc_url}">Open Alternate Link</a>')
+            link_lbl = QLabel(" | ".join(links))
+            link_lbl.setOpenExternalLinks(True)
+            layout.addWidget(link_lbl)
 
         browser = QTextBrowser()
         browser.setPlainText(summary)
@@ -284,20 +324,25 @@ class AlertsView(QWidget):
 
         actions = QHBoxLayout()
         actions.addStretch()
-        doc_url = self.resolve_document_url(filing.get("pdf_link"))
+        doc_url, alt_doc_url = self.resolve_document_urls(filing.get("pdf_link"))
         doc_btn = QPushButton("Open Document")
         doc_btn.setIcon(self.style().standardIcon(QStyle.SP_FileIcon))
         doc_btn.setEnabled(bool(doc_url))
+        if alt_doc_url:
+            doc_btn.setToolTip(f"Primary: {doc_url}\nAlternate: {alt_doc_url}")
         doc_btn.clicked.connect(lambda _=False, url=doc_url: self.open_pdf(url))
-        details_btn = QPushButton("Details")
-        details_btn.clicked.connect(lambda _=False, f=filing: self.open_filing_detail_dialog(f))
+        alt_btn = QPushButton("Alternate Link")
+        alt_btn.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
+        alt_btn.setEnabled(bool(alt_doc_url))
+        alt_btn.clicked.connect(lambda _=False, url=alt_doc_url: self.open_pdf(url))
         actions.addWidget(doc_btn)
-        actions.addWidget(details_btn)
+        actions.addWidget(alt_btn)
         root.addLayout(actions)
         return card
 
     def open_filing_detail_dialog(self, filing: dict):
         summary = filing.get("announcement_summary") or filing.get("headline") or "-"
+        doc_url, alt_doc_url = self.resolve_document_urls(filing.get("pdf_link"))
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Filing Details - {filing.get('symbol')}")
         dialog.resize(860, 560)
@@ -310,6 +355,13 @@ class AlertsView(QWidget):
         )
         title.setWordWrap(True)
         layout.addWidget(title)
+        if doc_url:
+            links = [f'<a href="{doc_url}">Open Document (Primary)</a>']
+            if alt_doc_url:
+                links.append(f'<a href="{alt_doc_url}">Open Alternate Link</a>')
+            link_lbl = QLabel(" | ".join(links))
+            link_lbl.setOpenExternalLinks(True)
+            layout.addWidget(link_lbl)
         browser = QTextBrowser()
         browser.setPlainText(summary)
         layout.addWidget(browser)

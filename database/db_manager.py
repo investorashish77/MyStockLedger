@@ -74,6 +74,43 @@ class DatabaseManager:
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_bse_daily_prices_code_date ON bse_daily_prices(bse_code, trade_date)")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS insight_snapshots (
+                snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stock_id INTEGER NOT NULL,
+                quarter_label TEXT NOT NULL,
+                insight_type TEXT NOT NULL,
+                source_filing_id INTEGER,
+                source_ref TEXT,
+                summary_text TEXT,
+                sentiment TEXT,
+                status TEXT NOT NULL DEFAULT 'GENERATED',
+                provider TEXT,
+                model_version TEXT,
+                generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(stock_id, quarter_label, insight_type)
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_insight_snapshots_stock_quarter ON insight_snapshots(stock_id, quarter_label)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_insight_snapshots_type ON insight_snapshots(insight_type, quarter_label)"
+        )
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS analyst_consensus (
+                consensus_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stock_id INTEGER NOT NULL UNIQUE,
+                report_text TEXT,
+                status TEXT NOT NULL DEFAULT 'GENERATED',
+                provider TEXT,
+                as_of_date DATE,
+                generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_analyst_consensus_stock ON analyst_consensus(stock_id)")
 
         conn.commit()
         self._close_connection(conn)
@@ -1205,6 +1242,200 @@ class DatabaseManager:
             }
             for row in rows
         ]
+
+    # Insight snapshot operations
+    def upsert_insight_snapshot(
+        self,
+        stock_id: int,
+        quarter_label: str,
+        insight_type: str,
+        summary_text: str = None,
+        sentiment: str = None,
+        status: str = "GENERATED",
+        source_filing_id: int = None,
+        source_ref: str = None,
+        provider: str = None,
+        model_version: str = None,
+    ) -> int:
+        """Insert/update one quarter insight snapshot and return snapshot_id."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO insight_snapshots
+            (stock_id, quarter_label, insight_type, source_filing_id, source_ref, summary_text, sentiment,
+             status, provider, model_version, generated_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(stock_id, quarter_label, insight_type) DO UPDATE SET
+                source_filing_id = COALESCE(excluded.source_filing_id, insight_snapshots.source_filing_id),
+                source_ref = COALESCE(excluded.source_ref, insight_snapshots.source_ref),
+                summary_text = COALESCE(excluded.summary_text, insight_snapshots.summary_text),
+                sentiment = COALESCE(excluded.sentiment, insight_snapshots.sentiment),
+                status = COALESCE(excluded.status, insight_snapshots.status),
+                provider = COALESCE(excluded.provider, insight_snapshots.provider),
+                model_version = COALESCE(excluded.model_version, insight_snapshots.model_version),
+                updated_at = CURRENT_TIMESTAMP
+        """, (
+            stock_id, quarter_label, insight_type, source_filing_id, source_ref, summary_text, sentiment,
+            status, provider, model_version
+        ))
+        conn.commit()
+        cursor.execute("""
+            SELECT snapshot_id
+            FROM insight_snapshots
+            WHERE stock_id = ? AND quarter_label = ? AND insight_type = ?
+            LIMIT 1
+        """, (stock_id, quarter_label, insight_type))
+        row = cursor.fetchone()
+        self._close_connection(conn)
+        return row[0]
+
+    def get_insight_snapshot(self, stock_id: int, quarter_label: str, insight_type: str) -> Optional[Dict]:
+        """Get one insight snapshot if exists."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT snapshot_id, stock_id, quarter_label, insight_type, source_filing_id, source_ref,
+                   summary_text, sentiment, status, provider, model_version, generated_at, updated_at
+            FROM insight_snapshots
+            WHERE stock_id = ? AND quarter_label = ? AND insight_type = ?
+            LIMIT 1
+        """, (stock_id, quarter_label, insight_type))
+        row = cursor.fetchone()
+        self._close_connection(conn)
+        if not row:
+            return None
+        return {
+            "snapshot_id": row[0],
+            "stock_id": row[1],
+            "quarter_label": row[2],
+            "insight_type": row[3],
+            "source_filing_id": row[4],
+            "source_ref": row[5],
+            "summary_text": row[6],
+            "sentiment": row[7],
+            "status": row[8],
+            "provider": row[9],
+            "model_version": row[10],
+            "generated_at": row[11],
+            "updated_at": row[12],
+        }
+
+    def get_user_insight_snapshots(self, user_id: int, quarter_label: str = None, limit: int = 500) -> List[Dict]:
+        """List portfolio insight snapshots with stock metadata."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        query = """
+            SELECT i.snapshot_id, i.stock_id, i.quarter_label, i.insight_type, i.source_filing_id, i.source_ref,
+                   i.summary_text, i.sentiment, i.status, i.provider, i.model_version, i.generated_at, i.updated_at,
+                   s.symbol, s.company_name, s.exchange
+            FROM insight_snapshots i
+            JOIN stocks s ON s.stock_id = i.stock_id
+            WHERE s.user_id = ?
+        """
+        params = [user_id]
+        if quarter_label:
+            query += " AND i.quarter_label = ?"
+            params.append(quarter_label)
+        query += " ORDER BY i.quarter_label DESC, s.symbol ASC, i.insight_type ASC LIMIT ?"
+        params.append(limit)
+        cursor.execute(query, tuple(params))
+        rows = cursor.fetchall()
+        self._close_connection(conn)
+        return [
+            {
+                "snapshot_id": row[0],
+                "stock_id": row[1],
+                "quarter_label": row[2],
+                "insight_type": row[3],
+                "source_filing_id": row[4],
+                "source_ref": row[5],
+                "summary_text": row[6],
+                "sentiment": row[7],
+                "status": row[8],
+                "provider": row[9],
+                "model_version": row[10],
+                "generated_at": row[11],
+                "updated_at": row[12],
+                "symbol": row[13],
+                "company_name": row[14],
+                "exchange": row[15],
+            }
+            for row in rows
+        ]
+
+    def get_latest_filing_dates_by_stock(self, user_id: int) -> Dict[int, str]:
+        """Return latest announcement_date string per stock in user portfolio."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT f.stock_id, MAX(f.announcement_date)
+            FROM filings f
+            JOIN stocks s ON s.stock_id = f.stock_id
+            WHERE s.user_id = ?
+            GROUP BY f.stock_id
+        """, (user_id,))
+        rows = cursor.fetchall()
+        self._close_connection(conn)
+        return {row[0]: row[1] for row in rows if row[0]}
+
+    # Analyst consensus operations
+    def upsert_analyst_consensus(
+        self,
+        stock_id: int,
+        report_text: str = None,
+        status: str = "GENERATED",
+        provider: str = None,
+        as_of_date: str = None,
+    ) -> int:
+        """Insert/update one analyst consensus report for a stock and return consensus_id."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO analyst_consensus
+            (stock_id, report_text, status, provider, as_of_date, generated_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(stock_id) DO UPDATE SET
+                report_text = COALESCE(excluded.report_text, analyst_consensus.report_text),
+                status = COALESCE(excluded.status, analyst_consensus.status),
+                provider = COALESCE(excluded.provider, analyst_consensus.provider),
+                as_of_date = COALESCE(excluded.as_of_date, analyst_consensus.as_of_date),
+                updated_at = CURRENT_TIMESTAMP
+        """, (stock_id, report_text, status, provider, as_of_date))
+        conn.commit()
+        cursor.execute("""
+            SELECT consensus_id
+            FROM analyst_consensus
+            WHERE stock_id = ?
+            LIMIT 1
+        """, (stock_id,))
+        row = cursor.fetchone()
+        self._close_connection(conn)
+        return row[0]
+
+    def get_analyst_consensus(self, stock_id: int) -> Optional[Dict]:
+        """Get analyst consensus report for a stock if available."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT consensus_id, stock_id, report_text, status, provider, as_of_date, generated_at, updated_at
+            FROM analyst_consensus
+            WHERE stock_id = ?
+            LIMIT 1
+        """, (stock_id,))
+        row = cursor.fetchone()
+        self._close_connection(conn)
+        if not row:
+            return None
+        return {
+            "consensus_id": row[0],
+            "stock_id": row[1],
+            "report_text": row[2],
+            "status": row[3],
+            "provider": row[4],
+            "as_of_date": row[5],
+            "generated_at": row[6],
+            "updated_at": row[7],
+        }
 
     def get_transaction_by_id(self, transaction_id: int) -> Optional[Dict]:
         '''Get a single transaction by ID'''

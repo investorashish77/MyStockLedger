@@ -3,15 +3,18 @@ Dashboard View
 Modern overview with KPI cards, trend signal, portfolio snapshot, and recent filings.
 """
 
+from datetime import datetime
+
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QTableWidget,
-    QTableWidgetItem, QHeaderView, QPushButton, QDialog, QTextEdit, QDialogButtonBox,
+    QTableWidgetItem, QHeaderView, QPushButton, QDialog, QTextEdit, QDialogButtonBox, QMessageBox,
     QGraphicsDropShadowEffect
 )
 from PyQt5.QtGui import QFont, QColor, QPainter, QPen, QPainterPath, QLinearGradient
 from PyQt5.QtCore import Qt
 
 from database.db_manager import DatabaseManager
+from services.ai_summary_service import AISummaryService
 from services.stock_service import StockService
 from utils.config import config
 
@@ -72,10 +75,17 @@ class PerformanceLineChart(QWidget):
 class DashboardView(QWidget):
     """Overview dashboard for key portfolio and filings insights."""
 
-    def __init__(self, db: DatabaseManager, stock_service: StockService, show_kpis: bool = True):
+    def __init__(
+        self,
+        db: DatabaseManager,
+        stock_service: StockService,
+        ai_service: AISummaryService = None,
+        show_kpis: bool = True
+    ):
         super().__init__()
         self.db = db
         self.stock_service = stock_service
+        self.ai_service = ai_service
         self.show_kpis = show_kpis
         self.current_user_id = None
         self.current_range = "weekly"
@@ -151,9 +161,10 @@ class DashboardView(QWidget):
         notes_panel.setLayout(notes_layout)
         notes_layout.addWidget(QLabel("Journal Notes"))
         self.notes_table = QTableWidget()
-        self.notes_table.setColumnCount(3)
-        self.notes_table.setHorizontalHeaderLabels(["Symbol", "Date", "Note"])
+        self.notes_table.setColumnCount(4)
+        self.notes_table.setHorizontalHeaderLabels(["Symbol", "Date", "Note", "Analyst View"])
         self.notes_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.notes_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.notes_table.verticalHeader().setDefaultSectionSize(46)
         self.notes_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.notes_table.doubleClicked.connect(self._edit_selected_note)
@@ -291,6 +302,88 @@ class DashboardView(QWidget):
             note_item = QTableWidgetItem(brief)
             note_item.setToolTip(note_text)
             self.notes_table.setItem(i, 2, note_item)
+            btn = QPushButton("Analyst View")
+            btn.setObjectName("actionBlendBtn")
+            btn.clicked.connect(lambda _=False, idx=i: self._open_analyst_view(idx))
+            self.notes_table.setCellWidget(i, 3, btn)
+
+    def _ensure_analyst_view_for_stock(self, note_row: dict) -> bool:
+        """Generate analyst view for one stock if missing."""
+        stock_id = note_row.get("stock_id")
+        if not stock_id:
+            return False
+        existing = self.db.get_analyst_consensus(stock_id)
+        if existing and (existing.get("report_text") or "").strip():
+            return True
+        if not self.ai_service or not self.ai_service.is_available():
+            return False
+
+        as_of_date = datetime.now().strftime("%Y-%m-%d")
+        current_price = self.db.get_latest_price(stock_id)
+        result = self.ai_service.generate_analyst_consensus(
+            company_name=note_row.get("company_name") or note_row.get("symbol") or "",
+            stock_symbol=note_row.get("symbol") or "",
+            current_price=current_price,
+            as_of_date=as_of_date,
+        )
+        if result and (result.get("summary_text") or "").strip():
+            self.db.upsert_analyst_consensus(
+                stock_id=stock_id,
+                report_text=result.get("summary_text"),
+                status="GENERATED",
+                provider=result.get("provider") or self.ai_service.provider,
+                as_of_date=as_of_date,
+            )
+            return True
+
+        self.db.upsert_analyst_consensus(
+            stock_id=stock_id,
+            report_text=None,
+            status="FAILED",
+            provider=self.ai_service.provider if self.ai_service else None,
+            as_of_date=as_of_date,
+        )
+        return False
+
+    def _open_analyst_view(self, row_idx: int):
+        if row_idx < 0 or row_idx >= len(self.current_notes):
+            return
+        note_row = self.current_notes[row_idx]
+        stock_id = note_row.get("stock_id")
+        if not stock_id:
+            QMessageBox.information(self, "Analyst View", "Stock reference not available.")
+            return
+        if not self._ensure_analyst_view_for_stock(note_row):
+            QMessageBox.information(
+                self,
+                "Analyst View",
+                "Unable to generate analyst consensus now (possible rate limit). Try again later."
+            )
+            return
+        report = self.db.get_analyst_consensus(stock_id)
+        if not report or not (report.get("report_text") or "").strip():
+            QMessageBox.information(self, "Analyst View", "Analyst consensus not available yet.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Analyst View - {note_row.get('symbol')}")
+        dialog.resize(820, 560)
+        self._apply_active_theme(dialog)
+        root = QVBoxLayout(dialog)
+        meta = QLabel(
+            f"{note_row.get('company_name') or note_row.get('symbol')} | "
+            f"As of: {report.get('as_of_date') or '-'} | "
+            f"Provider: {report.get('provider') or '-'}"
+        )
+        root.addWidget(meta)
+        viewer = QTextEdit()
+        viewer.setReadOnly(True)
+        viewer.setPlainText(report.get("report_text") or "")
+        root.addWidget(viewer)
+        ok_btn = QDialogButtonBox(QDialogButtonBox.Ok)
+        ok_btn.accepted.connect(dialog.accept)
+        root.addWidget(ok_btn)
+        dialog.exec_()
 
     def _edit_selected_note(self, index):
         row = index.row()
