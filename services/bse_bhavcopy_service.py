@@ -21,6 +21,14 @@ class BSEBhavcopyService:
     """Ingest BSE daily bhavcopy OHLCV data."""
 
     def __init__(self, db_manager: DatabaseManager):
+        """Init.
+
+        Args:
+            db_manager: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.db = db_manager
         self.logger = get_logger(__name__)
         cache_dir = os.getenv("BSE_BHAVCOPY_CACHE_DIR", "BhavCopy").strip() or "BhavCopy"
@@ -91,6 +99,17 @@ class BSEBhavcopyService:
         return written
 
     def fetch_and_ingest_range(self, from_date: date, to_date: date, skip_weekends: bool = True, fail_fast: bool = False) -> int:
+        """Fetch and ingest range.
+
+        Args:
+            from_date: Input parameter.
+            to_date: Input parameter.
+            skip_weekends: Input parameter.
+            fail_fast: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         total = 0
         failures = 0
         current = from_date
@@ -115,6 +134,15 @@ class BSEBhavcopyService:
 
     @staticmethod
     def _normalize_raw_rows(raw, trade_date: date) -> List[Dict]:
+        """Normalize raw rows.
+
+        Args:
+            raw: Input parameter.
+            trade_date: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if raw is None:
             return []
         if hasattr(raw, "to_dict"):
@@ -134,6 +162,14 @@ class BSEBhavcopyService:
         return out
 
     def _fetch_bhavcopy_rows_for_date(self, trade_date: date) -> List[Dict]:
+        """Fetch bhavcopy rows for date.
+
+        Args:
+            trade_date: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         payload = self._load_or_download_bhavcopy_payload(trade_date)
         if payload is None:
             return []
@@ -142,6 +178,14 @@ class BSEBhavcopyService:
         return self._normalize_raw_rows(rows, trade_date)
 
     def _load_or_download_bhavcopy_payload(self, trade_date: date) -> Optional[bytes]:
+        """Load or download bhavcopy payload.
+
+        Args:
+            trade_date: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         cache_file = self._cache_file_path(trade_date)
         if cache_file.exists() and cache_file.stat().st_size > 0:
             self.logger.info("Using cached bhavcopy for %s from %s", trade_date.isoformat(), cache_file)
@@ -149,6 +193,15 @@ class BSEBhavcopyService:
         return self._download_and_cache_bhavcopy_payload(trade_date, cache_file)
 
     def _download_and_cache_bhavcopy_payload(self, trade_date: date, cache_file: Path) -> Optional[bytes]:
+        """Download and cache bhavcopy payload.
+
+        Args:
+            trade_date: Input parameter.
+            cache_file: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         target_url = self._build_bhavcopy_url(trade_date)
         self.logger.info("Downloading bhavcopy for %s from %s", trade_date.isoformat(), target_url)
         response = requests.get(
@@ -179,11 +232,27 @@ class BSEBhavcopyService:
         return payload
 
     def _cache_file_path(self, trade_date: date) -> Path:
+        """Cache file path.
+
+        Args:
+            trade_date: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         filename = f"BhavCopy_BSE_CM_0_0_0_{trade_date.strftime('%Y%m%d')}_F_0000.csv"
         return self.cache_dir / filename
 
     @staticmethod
     def _extract_csv_bytes(content: bytes) -> bytes:
+        """Extract csv bytes.
+
+        Args:
+            content: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if content.startswith(b"PK"):
             with zipfile.ZipFile(io.BytesIO(content)) as zf:
                 members = [m for m in zf.namelist() if m.lower().endswith(".csv")]
@@ -194,6 +263,14 @@ class BSEBhavcopyService:
 
     @staticmethod
     def _parse_csv_rows(csv_bytes: bytes) -> List[Dict]:
+        """Parse csv rows.
+
+        Args:
+            csv_bytes: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if not csv_bytes:
             return []
         text = ""
@@ -210,6 +287,14 @@ class BSEBhavcopyService:
 
     @staticmethod
     def _build_bhavcopy_url(trade_date: date) -> str:
+        """Build bhavcopy url.
+
+        Args:
+            trade_date: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         date_token = trade_date.strftime("%Y%m%d")
         url_template = os.getenv(
             "BSE_BHAVCOPY_URL_TEMPLATE",
@@ -219,6 +304,14 @@ class BSEBhavcopyService:
 
     @staticmethod
     def _normalize_date_string(value: Optional[str]) -> Optional[str]:
+        """Normalize date string.
+
+        Args:
+            value: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if not value:
             return None
         text = str(value).strip()
@@ -237,6 +330,14 @@ class BSEBhavcopyService:
 
     @staticmethod
     def _to_float(value):
+        """To float.
+
+        Args:
+            value: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if value in (None, ""):
             return None
         try:

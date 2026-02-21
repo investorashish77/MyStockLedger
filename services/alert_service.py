@@ -32,6 +32,14 @@ class AlertService:
     }
     
     def __init__(self, db_manager: DatabaseManager):
+        """Init.
+
+        Args:
+            db_manager: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.db = db_manager
         self.stock_service = StockService()
         self.bse_feed_service = BSEFeedService(db_manager)
@@ -354,6 +362,14 @@ Board approved interim dividend of ₹10 per share.
         return "\n".join(details).strip()
 
     def _classify_category(self, headline: str) -> str:
+        """Classify category.
+
+        Args:
+            headline: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         text = (headline or "").lower()
         if any(keyword in text for keyword in self.CATEGORY_KEYWORDS["Earnings Call"]):
             return "Earnings Call"

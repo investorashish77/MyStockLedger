@@ -12,6 +12,14 @@ class AuthService:
     """Handles user authentication"""
     
     def __init__(self, db_manager: DatabaseManager):
+        """Init.
+
+        Args:
+            db_manager: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.db = db_manager
     
     def hash_password(self, password: str) -> str:

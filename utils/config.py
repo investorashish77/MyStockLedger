@@ -74,6 +74,7 @@ class Config:
         self.ENABLE_ADMIN_REGENERATE = os.getenv('ENABLE_ADMIN_REGENERATE', 'true').lower() == 'true'
         self.WATCHMAN_AUTO_RUN_ON_LOGIN = os.getenv('WATCHMAN_AUTO_RUN_ON_LOGIN', 'false').lower() == 'true'
         self.FILINGS_OVERRIDE_ADMIN_ONLY = os.getenv('FILINGS_OVERRIDE_ADMIN_ONLY', 'true').lower() == 'true'
+        self.ADMIN_SYNC_ADMIN_ONLY = os.getenv('ADMIN_SYNC_ADMIN_ONLY', 'true').lower() == 'true'
         self.ADMIN_USER_IDS = [
             int(x.strip()) for x in os.getenv('ADMIN_USER_IDS', '').split(',') if x.strip().isdigit()
         ]

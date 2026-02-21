@@ -7,6 +7,7 @@ import json
 import hashlib
 import re
 import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 import requests
@@ -24,6 +25,14 @@ class BSEFeedService:
     }
 
     def __init__(self, db_manager: DatabaseManager):
+        """Init.
+
+        Args:
+            db_manager: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.db = db_manager
 
     def fetch_rss_items(self, rss_url: str, timeout: int = 30) -> List[Dict]:
@@ -90,6 +99,61 @@ class BSEFeedService:
         Mirrors the working BSE AnnSubCategoryGetData request shape.
         """
         endpoint = (api_url or "").strip() or self.DEFAULT_BSE_API_URL
+        endpoints = [endpoint]
+        if "AnnSubCategoryGetData" in endpoint:
+            endpoints.append(endpoint.replace("AnnSubCategoryGetData", "AnnGetData"))
+
+        for ep in endpoints:
+            total = self._ingest_api_range_with_endpoint(
+                api_url=ep,
+                start_date_yyyymmdd=start_date_yyyymmdd,
+                end_date_yyyymmdd=end_date_yyyymmdd,
+                max_pages=max_pages,
+                category=category,
+                search=search,
+                filing_type=filing_type,
+                scrip_code=scrip_code,
+                timeout=timeout,
+            )
+            if total > 0:
+                return total
+
+        # Fallback: some BSE API responses return {} for date ranges but work for single-day queries.
+        if start_date_yyyymmdd != end_date_yyyymmdd:
+            total = 0
+            for day in self._iter_dates_yyyymmdd(start_date_yyyymmdd, end_date_yyyymmdd):
+                for ep in endpoints:
+                    day_count = self._ingest_api_range_with_endpoint(
+                        api_url=ep,
+                        start_date_yyyymmdd=day,
+                        end_date_yyyymmdd=day,
+                        max_pages=max_pages,
+                        category=category,
+                        search=search,
+                        filing_type=filing_type,
+                        scrip_code=scrip_code,
+                        timeout=timeout,
+                    )
+                    if day_count > 0:
+                        total += day_count
+                        break
+            return total
+
+        return 0
+
+    def _ingest_api_range_with_endpoint(
+        self,
+        api_url: str,
+        start_date_yyyymmdd: str,
+        end_date_yyyymmdd: str,
+        max_pages: int,
+        category: str,
+        search: str,
+        filing_type: str,
+        scrip_code: Optional[str],
+        timeout: int,
+    ) -> int:
+        """Run one API-range ingest against a specific endpoint."""
         request_params = {
             "pageno": 1,
             "strCat": category,
@@ -103,7 +167,7 @@ class BSEFeedService:
         total = 0
         for page in range(1, max_pages + 1):
             request_params["pageno"] = page
-            response = self._fetch_with_api_headers(api_url=endpoint, timeout=timeout, params=request_params)
+            response = self._fetch_with_api_headers(api_url=api_url, timeout=timeout, params=request_params)
             response_payload = response.json()
             rows = self._extract_api_rows(response_payload)
             if not rows:
@@ -123,12 +187,12 @@ class BSEFeedService:
                     or row.get("NSURL")
                     or row.get("attachment_url")
                 )
-                scrip_code = str(row.get("scrip_code") or row.get("SCRIP_CD") or row.get("SCRIPCODE") or "").strip() or None
+                row_scrip_code = str(row.get("scrip_code") or row.get("SCRIP_CD") or row.get("SCRIPCODE") or "").strip() or None
                 guid = str(row.get("guid") or row.get("NEWSID") or row.get("id") or row.get("SLONGNAME") or "").strip() or None
-                symbol_id = self._resolve_symbol_id(scrip_code=scrip_code)
+                symbol_id = self._resolve_symbol_id(scrip_code=row_scrip_code)
                 self.db.add_bse_announcement(
                     symbol_id=symbol_id,
-                    scrip_code=scrip_code,
+                    scrip_code=row_scrip_code,
                     headline=headline,
                     category="BSE_API",
                     announcement_date=str(
@@ -151,6 +215,23 @@ class BSEFeedService:
                 total += 1
         return total
 
+    @staticmethod
+    def _iter_dates_yyyymmdd(start_date_yyyymmdd: str, end_date_yyyymmdd: str) -> List[str]:
+        """Iterate inclusive YYYYMMDD dates; returns empty list if parsing fails."""
+        try:
+            s = datetime.strptime(start_date_yyyymmdd, "%Y%m%d").date()
+            e = datetime.strptime(end_date_yyyymmdd, "%Y%m%d").date()
+        except Exception:
+            return []
+        if s > e:
+            s, e = e, s
+        out = []
+        cur = s
+        while cur <= e:
+            out.append(cur.strftime("%Y%m%d"))
+            cur += timedelta(days=1)
+        return out
+
     def get_unprocessed(self, limit: int = 100) -> List[Dict]:
         """Read unprocessed announcements from DB."""
         return self.db.get_unprocessed_bse_announcements(limit=limit)
@@ -171,6 +252,15 @@ class BSEFeedService:
 
     @staticmethod
     def _get_text(node, tag: str) -> Optional[str]:
+        """Get text.
+
+        Args:
+            node: Input parameter.
+            tag: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         child = node.find(tag)
         if child is None or child.text is None:
             return None

@@ -258,6 +258,233 @@ class AnalyticsView(QWidget):
 ### Product Goals
 - Show last 4-8 quarters of key financials for each stock.
 - Show core fundamental ratios (valuation, profitability, growth, leverage).
+
+---
+
+## 10. PRIORITIZED IMPLEMENTATION BACKLOG + SPRINT PLAN
+
+This section is the execution board for upcoming work.  
+Priority legend:
+- `P0` = critical (ship first)
+- `P1` = high value (next wave)
+- `P2` = scale/public readiness
+
+### 10.1 P0 Backlog (Now: reliability + core product loops)
+
+#### P0-1) Onboarding + Empty States
+- Priority: `P0`
+- Goal: First-time user can complete setup in <5 minutes.
+- Scope:
+  - Guided first-run prompts (Add Transaction -> Sync Filings -> Generate first Insights).
+  - Better empty-state CTAs on Dashboard/Portfolio/Filings/Insights.
+- Dependencies: none
+- Estimate: `M` (2-3 days)
+- Acceptance Criteria:
+  - New user sees contextual next-step actions.
+  - No “dead end” blank screen.
+
+#### P0-2) Journal V2 (Structured Notes)
+- Priority: `P0`
+- Goal: Make journal notes analyzable, not just free text.
+- Scope:
+  - Add structured fields: setup type, confidence (1-5), risk tag, mistake tags, reflection.
+  - Keep thesis free-text field backward compatible.
+- Dependencies: DB migration
+- Estimate: `M` (3-4 days)
+- Acceptance Criteria:
+  - Add/Edit transaction supports structured note fields.
+  - Existing notes remain readable and editable.
+
+#### P0-3) Stock Drilldown View
+- Priority: `P0`
+- Goal: One place to inspect a stock deeply.
+- Scope:
+  - New stock detail view/panel with tabs:
+    - Transactions
+    - Filings timeline
+    - Insights snapshots
+    - Analyst View
+- Dependencies: existing stock/filings/insights data
+- Estimate: `M` (3-5 days)
+- Acceptance Criteria:
+  - Clicking a holding opens drilldown with all data sections.
+
+#### P0-4) Filings Category Override
+- Priority: `P0`
+- Goal: Fix mis-classification noise in filings.
+- Scope:
+  - Manual category edit in Filings.
+  - Lock/manual override flag so sync cannot overwrite.
+- Dependencies: filings schema extension
+- Estimate: `M` (2-3 days)
+- Acceptance Criteria:
+  - Manual override persists across sync/refresh/restart.
+
+#### P0-5) Insight Quality Guardrails
+- Priority: `P0`
+- Goal: Improve trust in generated Result/Concall insights.
+- Scope:
+  - Display source filing reference in summary popup.
+  - Add admin “regen single stock + quarter + insight type”.
+  - Keep “Not available” snapshots hidden from UI.
+- Dependencies: watchman snapshot table
+- Estimate: `S` (1-2 days)
+- Acceptance Criteria:
+  - User can see exactly which filing created each insight.
+
+#### P0-6) AI Job Queue + Retry (Rate-limit resilience)
+- Priority: `P0`
+- Goal: Never lose generation attempts due to 429/timeout failures.
+- Scope:
+  - `ai_jobs` queue table
+  - retry policy (exponential backoff)
+  - worker script for pending jobs
+- Dependencies: migrations + service layer
+- Estimate: `M/L` (4-6 days)
+- Acceptance Criteria:
+  - failed jobs auto-retry and persist final status.
+
+---
+
+### 10.2 P1 Backlog (Decision-support analytics)
+
+#### P1-1) Trade Analytics Dashboard
+- Priority: `P1`
+- Scope:
+  - Win rate, avg gain/loss, holding period, setup-level performance.
+- Dependencies: Journal V2
+- Estimate: `L` (5-7 days)
+
+#### P1-2) PnL Calendar
+- Priority: `P1`
+- Scope:
+  - Day-level realized/unrealized PnL + linked notes + filings events.
+- Dependencies: price history + transactions + notes
+- Estimate: `M` (3-4 days)
+
+#### P1-3) Tag-based Filtering Everywhere
+- Priority: `P1`
+- Scope:
+  - Filter by setup tags, risk tags, mistake tags in Journal/Analytics/Insights.
+- Dependencies: Journal V2
+- Estimate: `M` (2-3 days)
+
+#### P1-4) Event Impact Lens
+- Priority: `P1`
+- Scope:
+  - Price move after filing event windows (1D, 3D, 7D).
+- Dependencies: filings + bse_daily_prices
+- Estimate: `M` (3-4 days)
+
+#### P1-5) Portfolio Segments
+- Priority: `P1`
+- Scope:
+  - Multiple logical portfolios/strategies under one account.
+- Dependencies: schema updates
+- Estimate: `M` (3-5 days)
+
+---
+
+### 10.3 P2 Backlog (Scale + public product readiness)
+
+#### P2-1) Cloud Sync Architecture
+- Priority: `P2`
+- Scope:
+  - Optional hosted backend + Postgres; keep SQLite local mode.
+- Dependencies: API/auth baseline
+- Estimate: `XL` (2-4 weeks)
+
+#### P2-2) Security + Audit
+- Priority: `P2`
+- Scope:
+  - roles (user/admin), audit logs, secrets hardening.
+- Dependencies: backend services
+- Estimate: `L` (1-2 weeks)
+
+#### P2-3) Mobile App Readiness
+- Priority: `P2`
+- Scope:
+  - API-first contracts for React Native/Flutter client later.
+- Dependencies: cloud sync + auth
+- Estimate: `XL`
+
+#### P2-4) Notification Engine
+- Priority: `P2`
+- Scope:
+  - Daily digest + event triggers + watchlist alerts.
+- Dependencies: jobs queue + backend
+- Estimate: `L`
+
+#### P2-5) Public Product Layer
+- Priority: `P2`
+- Scope:
+  - changelog, roadmap, privacy/terms, support page.
+- Dependencies: deployment/public hosting
+- Estimate: `M`
+
+---
+
+### 10.4 Sprint Plan (Proposed)
+
+#### Sprint 1 (P0 foundation)
+- Items:
+  - P0-1 Onboarding + Empty States
+  - P0-2 Journal V2
+  - P0-4 Filings Category Override
+- Target duration: 1.5-2 weeks
+- Exit criteria:
+  - clean first-run flow
+  - structured journal persisted
+  - filings category corrections stable
+
+#### Sprint 2 (P0 depth)
+- Items:
+  - P0-3 Stock Drilldown
+  - P0-5 Insight Guardrails
+- Target duration: 1-1.5 weeks
+- Exit criteria:
+  - stock-level deep navigation fully usable
+  - insight traceability visible
+
+#### Sprint 3 (P0 reliability + P1 kickoff)
+- Items:
+  - P0-6 AI Job Queue + Retry
+  - P1-2 PnL Calendar MVP
+- Target duration: 1.5-2 weeks
+- Exit criteria:
+  - generation failures retried automatically
+  - calendar view usable with day-level PnL
+
+#### Sprint 4 (P1 analytics)
+- Items:
+  - P1-1 Trade Analytics
+  - P1-3 Tag Filtering
+  - P1-4 Event Impact Lens
+- Target duration: 2 weeks
+- Exit criteria:
+  - analytics dashboard decision-useful
+  - tags drive practical filtering
+
+---
+
+### 10.5 Critical Dependency Requiring User Decision
+
+Most critical unresolved dependency: **AI provider strategy and budget envelope**.
+
+Current practical setup:
+- Global summaries: `Ollama` (local)
+- Analyst view: `Groq` (cloud)
+- Heavy watchman generation: standalone script/manual runs
+
+Decisions needed from user:
+1. Keep hybrid (`Ollama + Groq`) for next 1-2 sprints, or move to paid model early?
+2. Monthly AI budget cap (required for planning retry/queue limits)?
+3. Regeneration policy:
+   - manual only
+   - scheduled nightly
+   - both
+
+Without these decisions, queue + retry tuning and scale planning remain approximate.
 - Show analyst consensus: Buy/Hold/Sell distribution and average target price.
 
 ### Data Model Additions
@@ -578,3 +805,75 @@ comprehensive investment management with professional analytics.
 
 The Development Agent will help you build these features step by step,
 with full code generation, testing, and integration support.
+
+---
+
+## 11. Iteration Execution Board (Current)
+
+This board is the active execution tracker for the next iteration.
+
+### 11.1 Status Snapshot
+
+| ID | Item | Priority | Status | Notes |
+|---|---|---|---|---|
+| P0-1 | Onboarding + Empty States | P0 | Done | Help-menu checklist and first-run prompt are live. |
+| P0-2 | Journal V2 (structured notes) | P0 | Done | Setup/confidence/risk/mistake/reflection fields added in DB + UI. |
+| P0-3 | Stock Drilldown View | P0 | Pending | Not yet implemented as unified stock-level workspace. |
+| P0-4 | Filings Category Override | P0 | Done | Manual override + lock persists in DB/UI. |
+| P0-5 | Insight Quality Guardrails | P0 | Partial | Candidate ranking exists; needs stronger source traceability and QA checks. |
+| P0-6 | AI Job Queue + Retry | P0 | Partial | Background queue exists; no exponential backoff retry policy yet. |
+| AO-1 | Admin Sync: Announcements | P0 | Done | Async queue job wired from Filings view. |
+| AO-2 | Admin Sync: Bhavcopy | P0 | Done | Async queue job wired from Filings view. |
+| W-1 | Daily material watchman scan | P0 | Done | First-login/daily scan + bell notifications in place. |
+| R-1 | AI code review loop | P0 | In Progress | This iteration adds review tooling + process docs. |
+
+### 11.2 Detailed Task Board
+
+| Task ID | Description | Owner | Depends On | Design Changes | Test Changes | Target |
+|---|---|---|---|---|---|---|
+| ITER-01 | Harden insight source traceability (show filing source + timestamp + provider in insights UI consistently). | Dev | Existing snapshot schema | Add source metadata line in insights card/dialog; keep dark-theme style. | Add service + UI regression tests for source rendering paths. | Sprint 1 |
+| ITER-02 | Implement retry policy for AI generation jobs (max retries, backoff, terminal failed state). | Dev | background_jobs table | Add job status hints in UI (Queued/Running/Retrying/Failed). | Add unit tests for retry transitions and backoff count logic. | Sprint 1 |
+| ITER-03 | Build stock drilldown workspace (Transactions, Filings timeline, Insights snapshots, Analyst View). | Dev | Existing filings + watchman + analyst data | New central panel with tabbed sections and consistent theme. | Add UI tests for navigation + section data loading. | Sprint 2 |
+| ITER-04 | Add queue status pill near admin sync buttons in Filings view. | Dev | AO-1/AO-2 complete | Minimal chip/pill style aligned with sidebar interaction behavior. | Add UI test for visibility + status transitions. | Sprint 1 |
+| ITER-05 | Add category override audit info (who, when) and optional clear override action. | Dev | filings override fields | Small metadata line under category override control. | Add DB/service tests for clear/lock behavior. | Sprint 1 |
+| ITER-06 | Release checklist automation (AI review pass + tests + re-review pass before merge). | Dev | GitHub repo permissions | No product UI change; dev-process only. | CI checks for tests + lint + artifacts. | Sprint 1 |
+
+### 11.3 Critical Dependencies (Need User Confirmation)
+
+1. AI provider for code review in PRs:
+   - Primary: GitHub Copilot code review (recommended).
+   - Secondary fallback: local AI review script (Ollama/Groq/OpenAI).
+2. Branch policy:
+   - Require PR + green checks before merge to `main`.
+3. Retry policy limits for AI insight jobs:
+   - Suggested defaults: `max_retries=3`, exponential backoff base 60s.
+
+### 11.4 Definition of Done (for this iteration)
+
+1. Feature-level gate is mandatory: implement -> test -> AI review -> fix -> test -> AI re-review.
+2. A task cannot be marked `Done` until the second test pass and second AI review pass are complete.
+3. Every PR has: AI review notes + passing tests + one re-review pass after fixes.
+4. Admin sync operations stay non-blocking and status-visible.
+5. Insights show reliable source context and avoid low-quality empty summaries.
+6. No regression in existing `tests/test_services.py` suite.
+
+### 11.5 Execution Protocol (Per Feature)
+
+Use this checklist for each task (`ITER-*`):
+
+1. Scope lock:
+   - confirm acceptance criteria and files to touch.
+2. Implementation slice:
+   - complete one cohesive change set.
+3. First validation:
+   - run compile/tests.
+4. First AI review:
+   - run `python scripts/ai_code_review.py --base main`.
+5. Fix pass:
+   - resolve Critical/High findings, address Medium/Low or document rationale.
+6. Second validation:
+   - rerun compile/tests.
+7. Second AI review:
+   - rerun `python scripts/ai_code_review.py --base main` and verify no unresolved must-fix findings.
+8. Completion:
+   - update task status to `Done` only after steps 1-7 are satisfied.

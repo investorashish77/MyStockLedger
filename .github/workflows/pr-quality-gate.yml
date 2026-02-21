@@ -1,0 +1,38 @@
+name: PR Quality Gate
+
+on:
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Compile check
+        run: |
+          PYTHONPYCACHEPREFIX=.pycache_local python -m py_compile \
+            services/background_job_service.py \
+            services/watchman_service.py \
+            ui/main_window.py \
+            ui/alerts_view.py
+
+      - name: Run service tests
+        run: |
+          PYTHONPYCACHEPREFIX=.pycache_local python tests/test_services.py

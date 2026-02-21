@@ -21,6 +21,14 @@ HEADERS = {
 
 
 def parse_args():
+    """Parse args.
+
+    Args:
+        None.
+
+    Returns:
+        Any: Method output for caller use.
+    """
     parser = argparse.ArgumentParser(description="Fetch BSE announcements by day into local CSV repository")
     parser.add_argument("--from-date", default="20260101", help="Start date (YYYYMMDD)")
     parser.add_argument("--to-date", default=datetime.now().strftime("%Y%m%d"), help="End date (YYYYMMDD)")
@@ -33,6 +41,18 @@ def parse_args():
 
 
 def fetch_with_retry(url, headers, payload, timeout, max_retries):
+    """Fetch with retry.
+
+    Args:
+        url: Input parameter.
+        headers: Input parameter.
+        payload: Input parameter.
+        timeout: Input parameter.
+        max_retries: Input parameter.
+
+    Returns:
+        Any: Method output for caller use.
+    """
     attempt = 0
     while True:
         try:
@@ -54,6 +74,18 @@ def fetch_with_retry(url, headers, payload, timeout, max_retries):
 
 
 def fetch_one_day(date_str, timeout, max_retries, delay_min, delay_max):
+    """Fetch one day.
+
+    Args:
+        date_str: Input parameter.
+        timeout: Input parameter.
+        max_retries: Input parameter.
+        delay_min: Input parameter.
+        delay_max: Input parameter.
+
+    Returns:
+        Any: Method output for caller use.
+    """
     payload = {
         "pageno": 1,
         "strCat": "-1",
@@ -79,6 +111,15 @@ def fetch_one_day(date_str, timeout, max_retries, delay_min, delay_max):
 
 
 def write_daily_csv(output_path: Path, rows):
+    """Write daily csv.
+
+    Args:
+        output_path: Input parameter.
+        rows: Input parameter.
+
+    Returns:
+        Any: Method output for caller use.
+    """
     if rows:
         df = pd.DataFrame(rows)
     else:
@@ -88,6 +129,14 @@ def write_daily_csv(output_path: Path, rows):
 
 
 def main():
+    """Main.
+
+    Args:
+        None.
+
+    Returns:
+        Any: Method output for caller use.
+    """
     args = parse_args()
     start_date = datetime.strptime(args.from_date, "%Y%m%d")
     end_date = datetime.strptime(args.to_date, "%Y%m%d")

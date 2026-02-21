@@ -9,6 +9,14 @@ import sys
 
 
 def main():
+    """Main.
+
+    Args:
+        None.
+
+    Returns:
+        Any: Method output for caller use.
+    """
     parser = argparse.ArgumentParser(description="Sync BSE symbols into symbol_master from CSV")
     parser.add_argument("--db-path", default="data/equity_tracker.db")
     parser.add_argument("--csv-path", required=True, help="Path to downloaded BSE Equity CSV")

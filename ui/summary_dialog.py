@@ -13,6 +13,17 @@ class SummaryDialog(QDialog):
     
     def __init__(self, stock_symbol: str, summary_text: str, 
                  sentiment: str, parent=None):
+        """Init.
+
+        Args:
+            stock_symbol: Input parameter.
+            summary_text: Input parameter.
+            sentiment: Input parameter.
+            parent: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         super().__init__(parent)
         self.stock_symbol = stock_symbol
         self.summary_text = summary_text
@@ -158,6 +169,14 @@ class SummaryDialog(QDialog):
 
     @staticmethod
     def _detect_dark_theme(parent) -> bool:
+        """Detect dark theme.
+
+        Args:
+            parent: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if parent and hasattr(parent, "window"):
             win = parent.window()
             if hasattr(win, "current_theme"):

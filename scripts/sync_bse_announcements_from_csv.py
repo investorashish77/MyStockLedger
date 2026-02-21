@@ -11,6 +11,14 @@ from pathlib import Path
 
 
 def _clean(value):
+    """Clean.
+
+    Args:
+        value: Input parameter.
+
+    Returns:
+        Any: Method output for caller use.
+    """
     if value is None:
         return None
     text = str(value).strip()
@@ -20,11 +28,28 @@ def _clean(value):
 
 
 def _resolve_symbol_id(db, scrip_code):
+    """Resolve symbol id.
+
+    Args:
+        db: Input parameter.
+        scrip_code: Input parameter.
+
+    Returns:
+        Any: Method output for caller use.
+    """
     row = db.get_symbol_by_bse_code(scrip_code)
     return row["symbol_id"] if row else None
 
 
 def main():
+    """Main.
+
+    Args:
+        None.
+
+    Returns:
+        Any: Method output for caller use.
+    """
     parser = argparse.ArgumentParser(description="Sync announcement CSV files into bse_announcements")
     parser.add_argument("--db-path", default="data/equity_tracker.db")
     parser.add_argument("--input-dir", default="announcements", help="Directory containing daily announcement CSV files")

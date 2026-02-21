@@ -8,6 +8,16 @@ class EditTransactionDialog(QDialog):
     '''Dialog for editing an existing transaction'''
     
     def __init__(self, db: DatabaseManager, transaction_id: int, parent=None):
+        """Init.
+
+        Args:
+            db: Input parameter.
+            transaction_id: Input parameter.
+            parent: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         super().__init__(parent)
         self.db = db
         self.transaction_id = transaction_id
@@ -66,6 +76,39 @@ class EditTransactionDialog(QDialog):
         self.thesis_edit = QTextEdit()
         self.thesis_edit.setMaximumHeight(100)
         form.addRow("Investment Thesis:", self.thesis_edit)
+
+        # Journal V2
+        self.setup_type_combo = QComboBox()
+        self.setup_type_combo.setEditable(True)
+        self.setup_type_combo.addItems([
+            "Breakout",
+            "Pullback",
+            "Reversal",
+            "Value",
+            "Event-Driven",
+            "Momentum",
+            "Swing",
+            "Positional",
+        ])
+        form.addRow("Setup Type:", self.setup_type_combo)
+
+        self.confidence_spin = QSpinBox()
+        self.confidence_spin.setRange(1, 5)
+        self.confidence_spin.setValue(3)
+        form.addRow("Confidence (1-5):", self.confidence_spin)
+
+        self.risk_tags_input = QLineEdit()
+        self.risk_tags_input.setPlaceholderText("e.g., debt, regulation, commodity")
+        form.addRow("Risk Tags:", self.risk_tags_input)
+
+        self.mistake_tags_input = QLineEdit()
+        self.mistake_tags_input.setPlaceholderText("e.g., FOMO, no-stoploss")
+        form.addRow("Mistake Tags:", self.mistake_tags_input)
+
+        self.reflection_edit = QTextEdit()
+        self.reflection_edit.setMaximumHeight(80)
+        self.reflection_edit.setPlaceholderText("Post-trade reflection / checklist notes")
+        form.addRow("Reflection:", self.reflection_edit)
         
         layout.addLayout(form)
         
@@ -85,6 +128,14 @@ class EditTransactionDialog(QDialog):
         self.setLayout(layout)
 
     def _apply_active_theme(self):
+        """Apply active theme.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         win = self.parent().window() if self.parent() else None
         if win and hasattr(win, "styleSheet"):
             self.setStyleSheet(win.styleSheet())
@@ -117,6 +168,25 @@ class EditTransactionDialog(QDialog):
         
         if self.transaction_data['thesis']:
             self.thesis_edit.setPlainText(self.transaction_data['thesis'])
+
+        setup_type = self.transaction_data.get('setup_type')
+        if setup_type:
+            idx = self.setup_type_combo.findText(setup_type)
+            if idx >= 0:
+                self.setup_type_combo.setCurrentIndex(idx)
+            else:
+                self.setup_type_combo.setCurrentText(setup_type)
+
+        confidence_score = self.transaction_data.get('confidence_score')
+        if confidence_score:
+            try:
+                self.confidence_spin.setValue(int(confidence_score))
+            except Exception:
+                self.confidence_spin.setValue(3)
+
+        self.risk_tags_input.setText((self.transaction_data.get('risk_tags') or '').strip())
+        self.mistake_tags_input.setText((self.transaction_data.get('mistake_tags') or '').strip())
+        self.reflection_edit.setPlainText((self.transaction_data.get('reflection_note') or '').strip())
     
     def save_changes(self):
         '''Save the updated transaction'''
@@ -127,7 +197,12 @@ class EditTransactionDialog(QDialog):
             'transaction_date': self.date_edit.date().toString('yyyy-MM-dd'),
             'investment_horizon': self.horizon_combo.currentText(),
             'target_price': self.target_spin.value(),
-            'thesis': self.thesis_edit.toPlainText().strip()
+            'thesis': self.thesis_edit.toPlainText().strip(),
+            'setup_type': self.setup_type_combo.currentText().strip() or None,
+            'confidence_score': self.confidence_spin.value(),
+            'risk_tags': self.risk_tags_input.text().strip() or None,
+            'mistake_tags': self.mistake_tags_input.text().strip() or None,
+            'reflection_note': self.reflection_edit.toPlainText().strip() or None,
         }
         
         if self.db.update_transaction(self.transaction_id, **updates):

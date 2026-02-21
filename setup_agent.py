@@ -20,16 +20,42 @@ from pathlib import Path
 
 class SetupAgent:
     def __init__(self):
+        """Init.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.project_root = Path.cwd()
         self.errors = []
         self.warnings = []
         
     def print_header(self, text):
+        """Print header.
+
+        Args:
+            text: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         print("\n" + "="*60)
         print(f"  {text}")
         print("="*60 + "\n")
     
     def print_step(self, step_num, total_steps, description):
+        """Print step.
+
+        Args:
+            step_num: Input parameter.
+            total_steps: Input parameter.
+            description: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         print(f"\n[{step_num}/{total_steps}] {description}...")
     
     def check_python_version(self):
@@ -387,7 +413,14 @@ Personal use only (for now)
         return all_good
     
     def run(self):
-        """Execute the complete setup process"""
+        """Run.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.print_header("EQUITY TRACKER - Setup Agent")
         print("This will set up your development environment automatically.\n")
         

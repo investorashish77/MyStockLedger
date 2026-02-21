@@ -34,5 +34,10 @@ A desktop application for tracking equity investments with AI-powered analysis.
 - [ ] Multi-user support
 - [ ] Cloud deployment
 
+## AI Review Workflow
+- Iteration board: `ENHANCED_FEATURES_DESIGN.md` (Section 11)
+- AI code review loop: `DesignDocuments/AI_CODE_REVIEW_LOOP.md`
+- Local review script: `python scripts/ai_code_review.py --base main`
+
 ## License
 Personal use only (for now)

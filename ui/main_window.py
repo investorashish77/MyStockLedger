@@ -117,7 +117,7 @@ class MainWindow(QMainWindow):
         # Create views
         self.dashboard_view = DashboardView(self.db, self.stock_service, self.ai_service, show_kpis=False)
         self.portfolio_view = PortfolioView(self.db, self.stock_service)
-        self.alerts_view = AlertsView(self.db, self.alert_service, self.ai_service)
+        self.alerts_view = AlertsView(self.db, self.alert_service, self.ai_service, self.background_jobs)
         self.insights_view = InsightsView(self.db, self.alert_service, self.ai_service, self.background_jobs)
 
         self.content_stack.addWidget(self.dashboard_view)

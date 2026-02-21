@@ -23,15 +23,39 @@ class PerformanceLineChart(QWidget):
     """Simple line chart widget for portfolio trend visualization."""
 
     def __init__(self):
+        """Init.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         super().__init__()
         self.values = []
         self.setMinimumHeight(170)
 
     def set_values(self, values):
+        """Set values.
+
+        Args:
+            values: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.values = [float(v) for v in values if v is not None]
         self.update()
 
     def paintEvent(self, event):
+        """Paintevent.
+
+        Args:
+            event: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         super().paintEvent(event)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -82,6 +106,17 @@ class DashboardView(QWidget):
         ai_service: AISummaryService = None,
         show_kpis: bool = True
     ):
+        """Init.
+
+        Args:
+            db: Input parameter.
+            stock_service: Input parameter.
+            ai_service: Input parameter.
+            show_kpis: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         super().__init__()
         self.db = db
         self.stock_service = stock_service
@@ -93,6 +128,14 @@ class DashboardView(QWidget):
         self.setup_ui()
 
     def setup_ui(self):
+        """Setup ui.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         layout = QVBoxLayout()
         self.setLayout(layout)
 
@@ -177,6 +220,14 @@ class DashboardView(QWidget):
 
     @staticmethod
     def _build_card(title: str):
+        """Build card.
+
+        Args:
+            title: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         card = QFrame()
         card.setObjectName("kpiCard")
         layout = QVBoxLayout()
@@ -195,6 +246,15 @@ class DashboardView(QWidget):
         return card
 
     def load_dashboard(self, user_id: int, use_live_quotes: bool = True):
+        """Load dashboard.
+
+        Args:
+            user_id: Input parameter.
+            use_live_quotes: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.current_user_id = user_id
         portfolio = self.db.get_portfolio_summary(user_id)
         series_all = self.db.get_portfolio_performance_series(user_id=user_id)
@@ -206,6 +266,16 @@ class DashboardView(QWidget):
         self._update_range_buttons()
 
     def _render_portfolio_metrics(self, portfolio, series_all, use_live_quotes: bool = True):
+        """Render portfolio metrics.
+
+        Args:
+            portfolio: Input parameter.
+            series_all: Input parameter.
+            use_live_quotes: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         total_invested = 0.0
         total_current = 0.0
 
@@ -243,6 +313,14 @@ class DashboardView(QWidget):
         self._set_card(self.overall_card, total_returns, overall_pct)
 
     def _render_trend(self, series_all):
+        """Render trend.
+
+        Args:
+            series_all: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if not series_all:
             self.chart.set_values([])
             self.trend_label.setText("No trend data available (sync bhavcopy first).")
@@ -264,6 +342,15 @@ class DashboardView(QWidget):
             self.trend_label.setText("No trend data")
 
     def _render_holdings_table(self, portfolio, use_live_quotes: bool = True):
+        """Render holdings table.
+
+        Args:
+            portfolio: Input parameter.
+            use_live_quotes: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.holdings_table.setRowCount(0)
         ranked = []
         for row in portfolio:
@@ -289,6 +376,14 @@ class DashboardView(QWidget):
             self.holdings_table.setItem(i, 1, pnl_item)
 
     def _render_journal_notes(self, user_id: int):
+        """Render journal notes.
+
+        Args:
+            user_id: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.notes_table.setRowCount(0)
         self.current_notes = self.db.get_user_journal_notes(user_id)
         for i, row in enumerate(self.current_notes):
@@ -346,6 +441,14 @@ class DashboardView(QWidget):
         return False
 
     def _open_analyst_view(self, row_idx: int):
+        """Open analyst view.
+
+        Args:
+            row_idx: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if row_idx < 0 or row_idx >= len(self.current_notes):
             return
         note_row = self.current_notes[row_idx]
@@ -386,6 +489,14 @@ class DashboardView(QWidget):
         dialog.exec_()
 
     def _edit_selected_note(self, index):
+        """Edit selected note.
+
+        Args:
+            index: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         row = index.row()
         if row < 0 or row >= len(self.current_notes):
             return
@@ -410,6 +521,14 @@ class DashboardView(QWidget):
                 self._render_journal_notes(self.current_user_id)
 
     def set_range(self, range_key: str):
+        """Set range.
+
+        Args:
+            range_key: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.current_range = range_key
         self._update_range_buttons()
         if self.current_user_id:
@@ -417,12 +536,30 @@ class DashboardView(QWidget):
             self._render_trend(series_all)
 
     def _update_range_buttons(self):
+        """Update range buttons.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         selected = {"daily": self.daily_btn, "weekly": self.weekly_btn, "all_time": self.all_time_btn}
         for key, btn in selected.items():
             btn.setEnabled(key != self.current_range)
 
     @staticmethod
     def _set_card(card: QFrame, value: float, pct: float):
+        """Set card.
+
+        Args:
+            card: Input parameter.
+            value: Input parameter.
+            pct: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         color = "#2E7D32" if value >= 0 else "#C62828"
         card._value.setText(f"₹{value:,.2f}")
         card._value.setStyleSheet(f"color: {color};")
@@ -430,6 +567,14 @@ class DashboardView(QWidget):
         card._sub.setStyleSheet(f"color: {color};")
 
     def _apply_depth_effects(self):
+        """Apply depth effects.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         cfg = self._panel_shadow_preset()
         for panel in (self.chart_panel, self.holdings_panel, self.notes_panel):
             effect = QGraphicsDropShadowEffect()
@@ -440,6 +585,14 @@ class DashboardView(QWidget):
 
     @staticmethod
     def _panel_shadow_preset():
+        """Panel shadow preset.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         mapping = {
             "subtle": {"blur": 16, "offset": 3, "alpha": 75},
             "medium": {"blur": 26, "offset": 5, "alpha": 110},
@@ -448,6 +601,14 @@ class DashboardView(QWidget):
         return mapping.get(config.UI_GLOW_PRESET, mapping["medium"])
 
     def _apply_active_theme(self, widget: QWidget):
+        """Apply active theme.
+
+        Args:
+            widget: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         win = self.window() if hasattr(self, "window") else None
         if win and hasattr(win, "styleSheet"):
             widget.setStyleSheet(win.styleSheet())

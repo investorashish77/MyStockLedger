@@ -17,6 +17,14 @@ class SymbolMasterService:
     """Service for symbol master ingestion and lookup."""
 
     def __init__(self, db_manager: DatabaseManager):
+        """Init.
+
+        Args:
+            db_manager: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.db = db_manager
 
     def populate_symbols_from_rows(self, rows: List[Dict], source: str = "MANUAL") -> int:
@@ -112,6 +120,15 @@ class SymbolMasterService:
 
     @staticmethod
     def _derive_yahoo_symbol(symbol: str, exchange: str) -> str:
+        """Derive yahoo symbol.
+
+        Args:
+            symbol: Input parameter.
+            exchange: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         symbol = (symbol or "").strip().upper()
         exchange = (exchange or "").strip().upper()
         if not symbol:

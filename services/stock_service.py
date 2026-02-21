@@ -12,6 +12,14 @@ class StockService:
     """Handles stock data fetching and price updates"""
     
     def __init__(self):
+        """Init.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.logger = get_logger(__name__)
         self._stock_info_cache = {}
         self._price_cache = {}

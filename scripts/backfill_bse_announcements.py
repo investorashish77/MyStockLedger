@@ -9,6 +9,14 @@ import sys
 
 
 def main():
+    """Main.
+
+    Args:
+        None.
+
+    Returns:
+        Any: Method output for caller use.
+    """
     parser = argparse.ArgumentParser(description="Backfill BSE announcements by date range")
     parser.add_argument("--db-path", default="data/equity_tracker.db")
     parser.add_argument(

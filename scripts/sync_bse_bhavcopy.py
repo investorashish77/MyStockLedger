@@ -10,6 +10,14 @@ from datetime import datetime
 
 
 def main():
+    """Main.
+
+    Args:
+        None.
+
+    Returns:
+        Any: Method output for caller use.
+    """
     parser = argparse.ArgumentParser(description="Sync BSE bhavcopy into DB")
     parser.add_argument("--db-path", default="data/equity_tracker.db")
     parser.add_argument("--from-date", required=True, help="YYYY-MM-DD")

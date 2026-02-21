@@ -19,6 +19,14 @@ class DevelopmentAgent:
     """Interactive development agent for Equity Tracker"""
     
     def __init__(self):
+        """Init.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.project_root = Path(__file__).parent
         self.codebase_map = self._build_codebase_map()
         self.features_design = self._load_design_doc()

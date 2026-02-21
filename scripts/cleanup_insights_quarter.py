@@ -15,6 +15,14 @@ import sys
 
 
 def main() -> int:
+    """Main.
+
+    Args:
+        None.
+
+    Returns:
+        Any: Method output for caller use.
+    """
     parser = argparse.ArgumentParser(description="Cleanup insight snapshots by quarter label.")
     parser.add_argument(
         "--db-path",

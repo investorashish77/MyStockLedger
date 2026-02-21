@@ -16,6 +16,7 @@ from PyQt5.QtGui import QFont, QDesktopServices
 from database.db_manager import DatabaseManager
 from services.alert_service import AlertService
 from services.ai_summary_service import AISummaryService
+from services.background_job_service import BackgroundJobService
 from utils.config import config
 
 
@@ -25,12 +26,30 @@ class AlertsView(QWidget):
     SETTING_BACKFILL_DONE = "filings_api_backfill_done_v1"
     SETTING_LAST_SYNC_DATE = "filings_api_last_sync_date"
 
-    def __init__(self, db: DatabaseManager, alert_service: AlertService, ai_service: AISummaryService):
+    def __init__(
+        self,
+        db: DatabaseManager,
+        alert_service: AlertService,
+        ai_service: AISummaryService,
+        background_jobs: BackgroundJobService = None
+    ):
+        """Init.
+
+        Args:
+            db: Input parameter.
+            alert_service: Input parameter.
+            ai_service: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         super().__init__()
         self.db = db
         self.alert_service = alert_service
         self.ai_service = ai_service
+        self.background_jobs = background_jobs
         self.current_user_id = None
+        self.current_user = None
         self.current_filings = []
         self.stock_filter_map = {}
         self.category_options = [
@@ -48,6 +67,14 @@ class AlertsView(QWidget):
         self.setup_ui()
 
     def setup_ui(self):
+        """Setup ui.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         layout = QVBoxLayout()
         self.setLayout(layout)
 
@@ -75,6 +102,16 @@ class AlertsView(QWidget):
         sync_btn = QPushButton("Sync Filings")
         sync_btn.clicked.connect(lambda: self.sync_filings(force_api=True))
         header.addWidget(sync_btn)
+
+        self.admin_sync_ann_btn = QPushButton("Admin Sync Announcements")
+        self.admin_sync_ann_btn.clicked.connect(self.admin_sync_announcements)
+        self.admin_sync_ann_btn.setVisible(False)
+        header.addWidget(self.admin_sync_ann_btn)
+
+        self.admin_sync_bhav_btn = QPushButton("Admin Sync Bhavcopy")
+        self.admin_sync_bhav_btn.clicked.connect(self.admin_sync_bhavcopy)
+        self.admin_sync_bhav_btn.setVisible(False)
+        header.addWidget(self.admin_sync_bhav_btn)
         layout.addLayout(header)
 
         self.timeline_scroll = QScrollArea()
@@ -91,7 +128,20 @@ class AlertsView(QWidget):
         layout.addWidget(self.info_label)
 
     def load_alerts(self, user_id: int, sync_announcements: bool = True):
+        """Load alerts.
+
+        Args:
+            user_id: Input parameter.
+            sync_announcements: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.current_user_id = user_id
+        self.current_user = self.db.get_user_by_id(user_id)
+        can_admin = self._can_run_admin_operations()
+        self.admin_sync_ann_btn.setVisible(can_admin)
+        self.admin_sync_bhav_btn.setVisible(can_admin)
         self._load_stock_filter_options(user_id)
         if sync_announcements:
             self.sync_filings(force_api=False)
@@ -99,6 +149,14 @@ class AlertsView(QWidget):
             self.load_filings(user_id)
 
     def sync_filings(self, force_api: bool = False):
+        """Sync filings.
+
+        Args:
+            force_api: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if not self.current_user_id:
             return
 
@@ -121,6 +179,14 @@ class AlertsView(QWidget):
             )
 
     def load_filings(self, user_id: int):
+        """Load filings.
+
+        Args:
+            user_id: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         selected_stock_id = self.stock_filter_map.get(self.stock_filter.currentText())
         if selected_stock_id == "ALL":
             selected_stock_id = None
@@ -148,10 +214,26 @@ class AlertsView(QWidget):
         self.info_label.setText(f"Showing {len(filings)} filing(s).")
 
     def filter_changed(self):
+        """Filter changed.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if self.current_user_id:
             self.load_filings(self.current_user_id)
 
     def _load_stock_filter_options(self, user_id: int):
+        """Load stock filter options.
+
+        Args:
+            user_id: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         stocks = self.db.get_user_stocks(user_id)
         self.stock_filter.blockSignals(True)
         self.stock_filter.clear()
@@ -164,6 +246,14 @@ class AlertsView(QWidget):
         self.stock_filter.blockSignals(False)
 
     def open_pdf(self, url: str):
+        """Open pdf.
+
+        Args:
+            url: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if not url:
             QMessageBox.information(self, "No Link", "No filing link available.")
             return
@@ -171,6 +261,15 @@ class AlertsView(QWidget):
 
     @staticmethod
     def _join_base_and_filename(base_url: str, filename: str) -> str:
+        """Join base and filename.
+
+        Args:
+            base_url: Input parameter.
+            filename: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         base = (base_url or "").strip()
         if not base:
             return ""
@@ -180,6 +279,14 @@ class AlertsView(QWidget):
 
     @staticmethod
     def _extract_pdf_filename(value: str) -> str:
+        """Extract pdf filename.
+
+        Args:
+            value: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         text = (value or "").strip()
         if not text:
             return ""
@@ -213,6 +320,15 @@ class AlertsView(QWidget):
         return f"https://www.bseindia.com/{value.lstrip('/')}", ""
 
     def open_filing_details(self, row: int, column: int):
+        """Open filing details.
+
+        Args:
+            row: Input parameter.
+            column: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if row < 0 or row >= len(self.current_filings):
             return
         filing = self.current_filings[row]
@@ -245,6 +361,14 @@ class AlertsView(QWidget):
         dialog.exec_()
 
     def _sync_bse_api_before_render(self, force: bool = False):
+        """Sync bse api before render.
+
+        Args:
+            force: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         today = datetime.now().strftime("%Y%m%d")
         backfill_done = self.db.get_setting(self.SETTING_BACKFILL_DONE, "0") == "1"
         last_sync_date = self.db.get_setting(self.SETTING_LAST_SYNC_DATE, "")
@@ -272,6 +396,14 @@ class AlertsView(QWidget):
 
     @staticmethod
     def _category_color(category: str) -> str:
+        """Category color.
+
+        Args:
+            category: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         cat = (category or "").lower()
         mapping = {
             "results": "#3D5AFE",
@@ -286,23 +418,33 @@ class AlertsView(QWidget):
         return mapping.get(cat, "#5D6D7E")
 
     def _build_timeline_card(self, filing: dict) -> QWidget:
+        """Build timeline card.
+
+        Args:
+            filing: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         card = QFrame()
         card.setObjectName("timelineCard")
-        card.setStyleSheet(
-            "QFrame#timelineCard { border: 1px solid #D8E1EA; border-radius: 10px; padding: 8px; }"
-        )
+        card.setStyleSheet(self._card_style())
         root = QVBoxLayout()
         root.setContentsMargins(10, 8, 10, 8)
         root.setSpacing(6)
         card.setLayout(root)
 
         top = QHBoxLayout()
-        category = filing.get("category") or "General Update"
+        category = filing.get("effective_category") or filing.get("category") or "General Update"
         category_lbl = QLabel(category)
         category_lbl.setStyleSheet(
             f"background:{self._category_color(category)}; color:white; border-radius:10px; padding:3px 9px; font-size:11px;"
         )
         top.addWidget(category_lbl)
+        if filing.get("category_override"):
+            override_lbl = QLabel("Manual")
+            override_lbl.setStyleSheet("color:#60A5FA; font-size:11px; font-weight:600;")
+            top.addWidget(override_lbl)
         top.addStretch()
         top.addWidget(QLabel(filing.get("announcement_date") or "-"))
         root.addLayout(top)
@@ -338,9 +480,37 @@ class AlertsView(QWidget):
         actions.addWidget(doc_btn)
         actions.addWidget(alt_btn)
         root.addLayout(actions)
+
+        if self._can_override_categories():
+            override_row = QHBoxLayout()
+            override_row.addWidget(QLabel("Category Override:"))
+            override_combo = QComboBox()
+            override_combo.addItem("Auto (Detected)", userData="")
+            for option in self.category_options:
+                if option == "ALL":
+                    continue
+                override_combo.addItem(option, userData=option)
+            active_override = filing.get("category_override") or ""
+            idx = override_combo.findData(active_override)
+            override_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            override_row.addWidget(override_combo, 1)
+            save_btn = QPushButton("Apply")
+            save_btn.clicked.connect(
+                lambda _=False, fid=filing.get("filing_id"), c=override_combo: self._apply_category_override(fid, c)
+            )
+            override_row.addWidget(save_btn)
+            root.addLayout(override_row)
         return card
 
     def open_filing_detail_dialog(self, filing: dict):
+        """Open filing detail dialog.
+
+        Args:
+            filing: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         summary = filing.get("announcement_summary") or filing.get("headline") or "-"
         doc_url, alt_doc_url = self.resolve_document_urls(filing.get("pdf_link"))
         dialog = QDialog(self)
@@ -368,6 +538,117 @@ class AlertsView(QWidget):
         dialog.exec_()
 
     def _apply_active_theme(self, widget: QWidget):
+        """Apply active theme.
+
+        Args:
+            widget: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         win = self.window() if hasattr(self, "window") else None
         if win and hasattr(win, "styleSheet"):
             widget.setStyleSheet(win.styleSheet())
+
+    def _is_dark_theme(self) -> bool:
+        """Is dark theme.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
+        win = self.window() if hasattr(self, "window") else None
+        return bool(win and hasattr(win, "current_theme") and getattr(win, "current_theme") == "dark")
+
+    def _card_style(self) -> str:
+        """Card style.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
+        if self._is_dark_theme():
+            return "QFrame#timelineCard { border: 1px solid rgba(120,160,200,0.22); border-radius: 12px; padding: 8px; background: rgba(20,28,38,0.72); }"
+        return "QFrame#timelineCard { border: 1px solid #D8E1EA; border-radius: 12px; padding: 8px; background: #FFFFFF; }"
+
+    def _can_override_categories(self) -> bool:
+        """Can override categories.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
+        if not config.FILINGS_OVERRIDE_ADMIN_ONLY:
+            return True
+        return self._is_admin_user()
+
+    def _is_admin_user(self) -> bool:
+        """Check if current user is configured as admin."""
+        if not self.current_user:
+            return False
+        user_id = self.current_user.get("user_id")
+        mobile = str(self.current_user.get("mobile_number") or "").strip()
+        return (user_id in config.ADMIN_USER_IDS) or (mobile in config.ADMIN_USER_MOBILES)
+
+    def _apply_category_override(self, filing_id: int, combo: QComboBox):
+        """Apply category override.
+
+        Args:
+            filing_id: Input parameter.
+            combo: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
+        if not filing_id:
+            return
+        override_value = combo.currentData()
+        override_value = (override_value or "").strip() or None
+        self.db.set_filing_category_override(filing_id, override_value, locked=True)
+        self.load_filings(self.current_user_id)
+
+    def _can_run_admin_operations(self) -> bool:
+        """Check if current user can run admin sync operations."""
+        if not config.ADMIN_SYNC_ADMIN_ONLY:
+            return True
+        return self._is_admin_user()
+
+    def admin_sync_announcements(self):
+        """Queue admin announcements sync in background."""
+        if not self.current_user_id:
+            return
+        if not self._can_run_admin_operations():
+            QMessageBox.information(self, "Access Denied", "Admin sync operations are restricted.")
+            return
+        if not self.background_jobs:
+            QMessageBox.information(self, "Unavailable", "Background job service not ready.")
+            return
+        job_id = self.background_jobs.enqueue_announcements_sync_job(self.current_user_id, force_full=False)
+        QMessageBox.information(
+            self,
+            "Queued",
+            f"Announcements sync queued (Job #{job_id}). We will alert you once it is complete."
+        )
+
+    def admin_sync_bhavcopy(self):
+        """Queue admin bhavcopy sync in background."""
+        if not self.current_user_id:
+            return
+        if not self._can_run_admin_operations():
+            QMessageBox.information(self, "Access Denied", "Admin sync operations are restricted.")
+            return
+        if not self.background_jobs:
+            QMessageBox.information(self, "Unavailable", "Background job service not ready.")
+            return
+        job_id = self.background_jobs.enqueue_bhavcopy_sync_job(self.current_user_id, force_full=False)
+        QMessageBox.information(
+            self,
+            "Queued",
+            f"Bhavcopy sync queued (Job #{job_id}). We will alert you once it is complete."
+        )

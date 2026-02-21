@@ -7,9 +7,20 @@ import argparse
 import os
 import sys
 from datetime import datetime, timedelta
+import json
+
+import requests
 
 
 def main():
+    """Main.
+
+    Args:
+        None.
+
+    Returns:
+        Any: Method output for caller use.
+    """
     parser = argparse.ArgumentParser(description="Sync BSE RSS announcements")
     parser.add_argument(
         "--db-path",
@@ -29,6 +40,8 @@ def main():
     parser.add_argument("--category", default="-1", help="API mode strCat")
     parser.add_argument("--search", default="P", help="API mode strSearch")
     parser.add_argument("--type", dest="filing_type", default="C", help="API mode strType")
+    parser.add_argument("--scrip-code", default="", help="API mode strScrip (optional BSE code)")
+    parser.add_argument("--debug-api", action="store_true", help="Print first-page API diagnostics before ingest")
     args = parser.parse_args()
 
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -44,10 +57,55 @@ def main():
     db = DatabaseManager(args.db_path)
     feed_service = BSEFeedService(db)
 
+    def diagnose_api(api_url: str, from_date: str, to_date: str):
+        """Print first-page API diagnostics to help troubleshoot zero-row responses."""
+        params = {
+            "pageno": 1,
+            "strCat": args.category,
+            "strPrevDate": from_date,
+            "strScrip": (args.scrip_code or "").strip(),
+            "strSearch": args.search,
+            "strToDate": to_date,
+            "strType": args.filing_type,
+            "subcategory": "",
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0",
+            "Referer": "https://www.bseindia.com/",
+        }
+        print("API DIAGNOSTICS")
+        print(f"URL: {api_url}")
+        print(f"Params: {params}")
+        try:
+            resp = requests.get(api_url, params=params, headers=headers, timeout=30)
+            print(f"HTTP: {resp.status_code}")
+            print(f"Content-Type: {resp.headers.get('content-type')}")
+            payload = resp.json()
+            keys = list(payload.keys()) if isinstance(payload, dict) else []
+            print(f"Payload keys: {keys[:15]}")
+            rows = None
+            if isinstance(payload, dict):
+                for key in ("Table", "Table1", "Data", "data", "results"):
+                    if isinstance(payload.get(key), list):
+                        rows = payload.get(key)
+                        print(f"Rows key: {key}")
+                        break
+            row_count = len(rows) if isinstance(rows, list) else 0
+            print(f"Row count (page 1): {row_count}")
+            if row_count:
+                print("Sample row keys:", list(rows[0].keys())[:25])
+                print("Sample row:", json.dumps(rows[0], ensure_ascii=False)[:1000])
+            else:
+                print("Payload snippet:", json.dumps(payload, ensure_ascii=False)[:1000])
+        except Exception as exc:
+            print(f"Diagnostics failed: {exc}")
+
     if args.from_date or args.to_date:
         to_date = args.to_date or datetime.now().strftime("%Y%m%d")
         from_date = args.from_date or (datetime.now() - timedelta(days=7)).strftime("%Y%m%d")
         api_url = args.api_url or config.BSE_API_ENDPOINT
+        if args.debug_api:
+            diagnose_api(api_url=api_url, from_date=from_date, to_date=to_date)
         try:
             count = feed_service.ingest_api_range(
                 api_url=api_url,
@@ -57,6 +115,7 @@ def main():
                 category=args.category,
                 search=args.search,
                 filing_type=args.filing_type,
+                scrip_code=(args.scrip_code or "").strip() or None,
             )
             logger.info("Ingested %s item(s) from API: %s [%s..%s]", count, api_url, from_date, to_date)
             print(f"Ingested {count} item(s) from API: {api_url} [{from_date}..{to_date}]")

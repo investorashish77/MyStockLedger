@@ -18,6 +18,14 @@ class LoginDialog(QDialog):
     login_successful = pyqtSignal(dict)
     
     def __init__(self, parent=None):
+        """Init.
+
+        Args:
+            parent: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         super().__init__(parent)
         self.db = DatabaseManager()
         self.auth_service = AuthService(self.db)
@@ -119,6 +127,14 @@ class LoginDialog(QDialog):
 
     @staticmethod
     def _shadow_values():
+        """Shadow values.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         mapping = {
             "subtle": (22, 4, 110),
             "medium": (34, 8, 160),

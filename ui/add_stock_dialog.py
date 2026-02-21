@@ -17,6 +17,17 @@ class AddStockDialog(QDialog):
     
     def __init__(self, db: DatabaseManager, stock_service: StockService, 
                  user_id: int, parent=None):
+        """Init.
+
+        Args:
+            db: Input parameter.
+            stock_service: Input parameter.
+            user_id: Input parameter.
+            parent: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         super().__init__(parent)
         self.db = db
         self.stock_service = stock_service
@@ -133,6 +144,39 @@ class AddStockDialog(QDialog):
         )
         self.thesis_input.setMaximumHeight(120)
         strategy_layout.addRow("Investment Thesis:", self.thesis_input)
+
+        # Journal V2 fields
+        self.setup_type_input = QComboBox()
+        self.setup_type_input.setEditable(True)
+        self.setup_type_input.addItems([
+            "Breakout",
+            "Pullback",
+            "Reversal",
+            "Value",
+            "Event-Driven",
+            "Momentum",
+            "Swing",
+            "Positional",
+        ])
+        strategy_layout.addRow("Setup Type:", self.setup_type_input)
+
+        self.confidence_input = QSpinBox()
+        self.confidence_input.setRange(1, 5)
+        self.confidence_input.setValue(3)
+        strategy_layout.addRow("Confidence (1-5):", self.confidence_input)
+
+        self.risk_tags_input = QLineEdit()
+        self.risk_tags_input.setPlaceholderText("e.g., debt, regulation, commodity")
+        strategy_layout.addRow("Risk Tags:", self.risk_tags_input)
+
+        self.mistake_tags_input = QLineEdit()
+        self.mistake_tags_input.setPlaceholderText("e.g., FOMO, no-stoploss")
+        strategy_layout.addRow("Mistake Tags:", self.mistake_tags_input)
+
+        self.reflection_input = QTextEdit()
+        self.reflection_input.setMaximumHeight(80)
+        self.reflection_input.setPlaceholderText("Post-trade reflection / checklist notes")
+        strategy_layout.addRow("Reflection:", self.reflection_input)
         
         layout.addWidget(strategy_group)
         
@@ -245,6 +289,11 @@ class AddStockDialog(QDialog):
         horizon = self.horizon_input.currentText()
         target_price = self.target_price_input.value()
         thesis = self.thesis_input.toPlainText().strip()
+        setup_type = self.setup_type_input.currentText().strip()
+        confidence_score = self.confidence_input.value()
+        risk_tags = self.risk_tags_input.text().strip()
+        mistake_tags = self.mistake_tags_input.text().strip()
+        reflection_note = self.reflection_input.toPlainText().strip()
         
         try:
             # Add stock (or get existing)
@@ -259,7 +308,12 @@ class AddStockDialog(QDialog):
                 transaction_date=date,
                 investment_horizon=horizon,
                 target_price=target_price if target_price > 0 else None,
-                thesis=thesis if thesis else None
+                thesis=thesis if thesis else None,
+                setup_type=setup_type if setup_type else None,
+                confidence_score=confidence_score,
+                risk_tags=risk_tags if risk_tags else None,
+                mistake_tags=mistake_tags if mistake_tags else None,
+                reflection_note=reflection_note if reflection_note else None
             )
             
             # Save current price

@@ -16,6 +16,15 @@ class PortfolioView(QWidget):
     """Portfolio view widget"""
     
     def __init__(self, db: DatabaseManager, stock_service: StockService):
+        """Init.
+
+        Args:
+            db: Input parameter.
+            stock_service: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         super().__init__()
         self.db = db
         self.stock_service = stock_service
@@ -77,6 +86,14 @@ class PortfolioView(QWidget):
 
     @staticmethod
     def _build_kpi_card(title: str):
+        """Build kpi card.
+
+        Args:
+            title: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         card = QFrame()
         card.setObjectName("kpiCard")
         inner = QVBoxLayout()
@@ -204,6 +221,16 @@ class PortfolioView(QWidget):
         """)
 
     def _compute_daily_pnl(self, quote_symbol: str, current_price: float, quantity: int) -> float:
+        """Compute daily pnl.
+
+        Args:
+            quote_symbol: Input parameter.
+            current_price: Input parameter.
+            quantity: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         info = self.stock_service.get_stock_info(quote_symbol) or {}
         prev_close = info.get("previous_close") or info.get("current_price")
         try:
@@ -213,6 +240,16 @@ class PortfolioView(QWidget):
         return (current_price - prev_close) * quantity
 
     def _compute_weekly_pnl(self, quote_symbol: str, current_price: float, quantity: int) -> float:
+        """Compute weekly pnl.
+
+        Args:
+            quote_symbol: Input parameter.
+            current_price: Input parameter.
+            quantity: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         history = self.stock_service.get_historical_prices(quote_symbol, period="5d")
         if not history or not history.get("prices"):
             return 0.0
@@ -225,6 +262,15 @@ class PortfolioView(QWidget):
 
     @staticmethod
     def _set_kpi_value(card: QFrame, value: float):
+        """Set kpi value.
+
+        Args:
+            card: Input parameter.
+            value: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         label = getattr(card, "_value_label", None)
         if not label:
             return
@@ -254,6 +300,15 @@ class PortfolioView(QWidget):
 
     @staticmethod
     def _build_asset_cell(symbol: str, company_name: str) -> QWidget:
+        """Build asset cell.
+
+        Args:
+            symbol: Input parameter.
+            company_name: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         widget = QWidget()
         row = QHBoxLayout()
         row.setContentsMargins(6, 2, 6, 2)
@@ -280,6 +335,14 @@ class PortfolioView(QWidget):
 
     @staticmethod
     def _build_weight_cell(weight_pct: float) -> QWidget:
+        """Build weight cell.
+
+        Args:
+            weight_pct: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         widget = QWidget()
         layout = QVBoxLayout()
         layout.setContentsMargins(8, 4, 8, 4)
@@ -301,6 +364,15 @@ class PortfolioView(QWidget):
         return widget
 
     def _build_actions_cell(self, stock_id: int, symbol: str) -> QWidget:
+        """Build actions cell.
+
+        Args:
+            stock_id: Input parameter.
+            symbol: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         container = QWidget()
         layout = QHBoxLayout()
         layout.setContentsMargins(6, 0, 6, 0)
@@ -393,6 +465,14 @@ class PortfolioView(QWidget):
         dialog.exec_()
 
     def _apply_active_theme(self, widget: QWidget):
+        """Apply active theme.
+
+        Args:
+            widget: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         win = self.window() if hasattr(self, "window") else None
         if win and hasattr(win, "styleSheet"):
             widget.setStyleSheet(win.styleSheet())
