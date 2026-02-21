@@ -5,10 +5,12 @@ Builds quarter-specific portfolio insights from filings.
 
 from datetime import datetime, date
 import re
+from urllib.parse import urlparse
 from typing import Dict, List, Optional, Tuple
 
 from database.db_manager import DatabaseManager
 from services.ai_summary_service import AISummaryService
+from utils.config import config
 from utils.logger import get_logger
 
 
@@ -22,8 +24,41 @@ class WatchmanService:
         INSIGHT_RESULT: 7,
         INSIGHT_CONCALL: 8,
     }
+    MATERIAL_SCAN_LAST_RUN_KEY_PREFIX = "watchman_material_last_run_date_user_"
+    MATERIAL_SCAN_LAST_ID_KEY_PREFIX = "watchman_material_last_announcement_id_user_"
+    MATERIAL_CATEGORY_KEYWORDS = {
+        "New Order Win": [
+            "order win", "new order", "work order", "order received", "receives order",
+            "new export order", "contract awarded", "contract win"
+        ],
+        "New Plant Commissioning": [
+            "plant commissioned", "commissioning", "commencement of commercial production",
+            "new plant", "capacity expansion", "capacity commissioned"
+        ],
+        "New Acquisition": [
+            "acquisition", "acquire", "takeover", "merger", "amalgamation"
+        ],
+        "Preferential Share": [
+            "preferential issue", "preferential allotment", "preferential shares"
+        ],
+        "Fund Raise": [
+            "fund raise", "qip", "rights issue", "debenture", "ncd", "fpo", "raise capital"
+        ],
+        "Joint Venture": [
+            "joint venture", "jv agreement", "strategic alliance"
+        ],
+    }
 
     def __init__(self, db: DatabaseManager, ai_service: AISummaryService):
+        """Init.
+
+        Args:
+            db: Input parameter.
+            ai_service: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.db = db
         self.ai_service = ai_service
         self.logger = get_logger(__name__)
@@ -84,6 +119,159 @@ class WatchmanService:
         self.db.set_setting(self.DAILY_RUN_SETTING_KEY, today)
         return result
 
+    def run_daily_material_scan(self, user_id: int, daily_only: bool = True) -> Dict[str, int]:
+        """Scan newly ingested announcements and raise short material alerts for portfolio companies."""
+        today = date.today().isoformat()
+        run_key = f"{self.MATERIAL_SCAN_LAST_RUN_KEY_PREFIX}{user_id}"
+        if daily_only and self.db.get_setting(run_key) == today:
+            return {"scanned": 0, "alerts_created": 0, "skipped_daily": 1}
+
+        last_id_key = f"{self.MATERIAL_SCAN_LAST_ID_KEY_PREFIX}{user_id}"
+        last_seen_id = int(self.db.get_setting(last_id_key, "0") or "0")
+        announcements = self.db.get_bse_announcements_since_id(last_seen_id, limit=8000)
+        stocks = self.db.get_user_stocks_with_symbol_master(user_id)
+        if not stocks:
+            self.db.set_setting(run_key, today)
+            if announcements:
+                self.db.set_setting(last_id_key, str(max(a.get("announcement_id", 0) for a in announcements)))
+            return {"scanned": len(announcements), "alerts_created": 0, "skipped_daily": 0}
+
+        symbol_id_map = {s.get("symbol_id"): s for s in stocks if s.get("symbol_id")}
+        bse_code_map = {str(s.get("bse_code")).strip(): s for s in stocks if s.get("bse_code")}
+        alerts_created = 0
+        max_seen = last_seen_id
+        for announcement in announcements:
+            ann_id = int(announcement.get("announcement_id") or 0)
+            if ann_id > max_seen:
+                max_seen = ann_id
+            stock = self._match_announcement_to_stock_for_material(announcement, stocks, symbol_id_map, bse_code_map)
+            if not stock:
+                continue
+            category = self._classify_material_category(announcement.get("headline") or "")
+            if not category:
+                continue
+            short_summary = self._build_material_summary(announcement.get("headline") or "")
+            title = f"{category} Alert 🚨"
+            detail_url, alt_url = self._resolve_document_urls(announcement.get("attachment_url") or "")
+            detail_url = detail_url or "-"
+            message = (
+                f"Company: {stock.get('company_name') or stock.get('symbol')}\n\n"
+                f"🧾Summary: {short_summary}\n\n"
+                f"📁Details: {detail_url}"
+            )
+            if alt_url:
+                message = f"{message}\nAlternate: {alt_url}"
+            self.db.add_notification(
+                user_id=user_id,
+                notif_type="MATERIAL_ALERT",
+                title=title,
+                message=message,
+                metadata={
+                    "stock_id": stock.get("stock_id"),
+                    "symbol": stock.get("symbol"),
+                    "announcement_id": ann_id,
+                    "category": category,
+                    "detail_url": detail_url,
+                    "alternate_url": alt_url,
+                }
+            )
+            alerts_created += 1
+
+        self.db.set_setting(run_key, today)
+        self.db.set_setting(last_id_key, str(max_seen))
+        self.logger.info(
+            "Watchman material scan complete user=%s scanned=%s alerts=%s last_id=%s",
+            user_id, len(announcements), alerts_created, max_seen
+        )
+        return {"scanned": len(announcements), "alerts_created": alerts_created, "skipped_daily": 0}
+
+    def _match_announcement_to_stock_for_material(
+        self,
+        announcement: Dict,
+        stocks: List[Dict],
+        symbol_id_map: Dict[int, Dict],
+        bse_code_map: Dict[str, Dict],
+    ) -> Optional[Dict]:
+        """Match a new announcement to one of the portfolio stocks for material scanning."""
+        sid = announcement.get("symbol_id")
+        if sid in symbol_id_map:
+            return symbol_id_map[sid]
+
+        scrip_code = str(announcement.get("scrip_code") or "").strip()
+        if scrip_code and scrip_code in bse_code_map:
+            return bse_code_map[scrip_code]
+
+        headline = (announcement.get("headline") or "").upper()
+        headline_clean = re.sub(r"[^A-Z0-9 ]+", " ", headline)
+        for stock in stocks:
+            symbol = (stock.get("symbol") or "").upper().replace(".NS", "").replace(".BO", "")
+            if symbol and re.search(rf"\b{re.escape(symbol)}\b", headline_clean):
+                return stock
+            company = (stock.get("company_name") or "").upper()
+            alias = re.sub(r"\b(LIMITED|LTD|INDIA)\b", "", company).strip()
+            if alias and alias in headline_clean:
+                return stock
+        return None
+
+    def _classify_material_category(self, headline: str) -> Optional[str]:
+        """Return one critical material category if matched, else None."""
+        text = (headline or "").lower()
+        for category, keywords in self.MATERIAL_CATEGORY_KEYWORDS.items():
+            if any(keyword in text for keyword in keywords):
+                return category
+        return None
+
+    @staticmethod
+    def _build_material_summary(headline: str, max_words: int = 20) -> str:
+        """Build a concise alert summary from headline text."""
+        words = re.sub(r"\s+", " ", (headline or "").strip()).split(" ")
+        words = [w for w in words if w]
+        if not words:
+            return "Material filing identified."
+        if len(words) <= max_words:
+            return " ".join(words)
+        return f"{' '.join(words[:max_words])}..."
+
+    @staticmethod
+    def _join_base_and_filename(base_url: str, filename: str) -> str:
+        """Join configured base URL and PDF filename."""
+        base = (base_url or "").strip()
+        if not base:
+            return ""
+        if not base.endswith("/"):
+            base = f"{base}/"
+        return f"{base}{filename}"
+
+    @staticmethod
+    def _extract_pdf_filename(value: str) -> str:
+        """Extract file name from URL/path when announcement payload has relative path."""
+        text = (value or "").strip()
+        if not text:
+            return ""
+        parsed = urlparse(text)
+        candidate = parsed.path.split("/")[-1] if parsed.path else text.split("/")[-1]
+        candidate = candidate.split("?")[0].strip()
+        return candidate if candidate.lower().endswith(".pdf") else ""
+
+    @classmethod
+    def _resolve_document_urls(cls, raw_value: str) -> Tuple[str, str]:
+        """Resolve primary + alternate filing URLs from raw attachment value."""
+        value = (raw_value or "").strip()
+        if not value:
+            return "", ""
+        filename = cls._extract_pdf_filename(value)
+        if filename:
+            # Prefer AttachHis for material alerts; keep AttachLive as fallback.
+            primary = cls._join_base_and_filename(config.BSE_ATTACH_PRIMARY_BASE, filename)
+            alternate = cls._join_base_and_filename(config.BSE_ATTACH_SECONDARY_BASE, filename)
+            if value.startswith("http://") or value.startswith("https://"):
+                if value not in {primary, alternate}:
+                    alternate = value
+            return primary, alternate
+        if value.startswith("http://") or value.startswith("https://"):
+            return value, ""
+        return f"https://www.bseindia.com/{value.lstrip('/')}", ""
+
     def _generate_one_insight_for_stock(
         self,
         stock: Dict,
@@ -92,15 +280,31 @@ class WatchmanService:
         insight_type: str,
         force_regenerate: bool = False,
     ) -> Dict[str, int]:
+        """Generate one insight for stock.
+
+        Args:
+            stock: Input parameter.
+            quarter_label: Input parameter.
+            filings: Input parameter.
+            insight_type: Input parameter.
+            force_regenerate: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         stock_id = stock["stock_id"]
-        existing = self.db.get_insight_snapshot(stock_id, quarter_label, insight_type)
+        symbol_id = self._resolve_symbol_id_for_stock(stock, filings)
+        if not symbol_id:
+            return {"generated": 0, "skipped_existing": 0, "not_available": 1, "failed": 0}
+
+        existing = self.db.get_global_insight_snapshot(symbol_id, quarter_label, insight_type)
         if existing and not force_regenerate:
             return {"generated": 0, "skipped_existing": 1, "not_available": 0, "failed": 0}
 
         ranked_candidates = self._rank_candidates(filings, quarter_label, insight_type)
         if not ranked_candidates:
-            self.db.upsert_insight_snapshot(
-                stock_id=stock_id,
+            self.db.upsert_global_insight_snapshot(
+                symbol_id=symbol_id,
                 quarter_label=quarter_label,
                 insight_type=insight_type,
                 summary_text="Not available for this quarter.",
@@ -133,8 +337,8 @@ class WatchmanService:
 
         if not selected_candidate or not summary:
             fallback = ranked_candidates[0]
-            self.db.upsert_insight_snapshot(
-                stock_id=stock_id,
+            self.db.upsert_global_insight_snapshot(
+                symbol_id=symbol_id,
                 quarter_label=quarter_label,
                 insight_type=insight_type,
                 summary_text="Not available for this quarter.",
@@ -142,13 +346,13 @@ class WatchmanService:
                 status="FAILED",
                 source_filing_id=fallback.get("filing_id"),
                 source_ref=fallback.get("source_ref"),
-                provider=self.ai_service.provider,
+                provider=summary.get("provider") if summary else self.ai_service.provider,
                 model_version=None,
             )
             return {"generated": 0, "skipped_existing": 0, "not_available": 0, "failed": 1}
 
-        self.db.upsert_insight_snapshot(
-            stock_id=stock_id,
+        self.db.upsert_global_insight_snapshot(
+            symbol_id=symbol_id,
             quarter_label=quarter_label,
             insight_type=insight_type,
             summary_text=summary.get("summary_text"),
@@ -160,6 +364,27 @@ class WatchmanService:
             model_version=None,
         )
         return {"generated": 1, "skipped_existing": 0, "not_available": 0, "failed": 0}
+
+    def _resolve_symbol_id_for_stock(self, stock: Dict, filings: List[Dict]) -> Optional[int]:
+        """Resolve symbol id for stock.
+
+        Args:
+            stock: Input parameter.
+            filings: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
+        for filing in filings:
+            sid = filing.get("symbol_id")
+            if sid:
+                return sid
+        symbol = (stock.get("symbol") or "").upper()
+        symbol = symbol.replace(".NS", "").replace(".BO", "")
+        mapped = self.db.get_symbol_by_symbol(symbol)
+        if mapped:
+            return mapped.get("symbol_id")
+        return None
 
     def _rank_candidates(
         self,
@@ -185,6 +410,15 @@ class WatchmanService:
         return ranked
 
     def _resolve_latest_quarter_for_stock(self, stock_id: int, filings: List[Dict]) -> Optional[str]:
+        """Resolve latest quarter for stock.
+
+        Args:
+            stock_id: Input parameter.
+            filings: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         latest_dt = None
         latest_quarter = None
         for filing in filings:
@@ -198,6 +432,15 @@ class WatchmanService:
 
     @staticmethod
     def _is_allowed_category(category: str, insight_type: str) -> bool:
+        """Is allowed category.
+
+        Args:
+            category: Input parameter.
+            insight_type: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         c = (category or "").strip().lower()
         if insight_type == WatchmanService.INSIGHT_RESULT:
             return c == "results"
@@ -207,6 +450,15 @@ class WatchmanService:
 
     @staticmethod
     def _candidate_score(filing: Dict, insight_type: str) -> int:
+        """Candidate score.
+
+        Args:
+            filing: Input parameter.
+            insight_type: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         text = f"{filing.get('headline') or ''} {filing.get('announcement_summary') or ''}".lower()
         score = 0
         if filing.get("pdf_link"):
@@ -260,6 +512,14 @@ class WatchmanService:
 
     @staticmethod
     def _quarter_from_filing(filing: Dict) -> Optional[str]:
+        """Quarter from filing.
+
+        Args:
+            filing: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         d = WatchmanService._parse_date(filing.get("announcement_date"))
         if not d:
             return None
@@ -267,6 +527,14 @@ class WatchmanService:
 
     @staticmethod
     def _parse_date(value: str) -> Optional[date]:
+        """Parse date.
+
+        Args:
+            value: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if not value:
             return None
         text = str(value).strip()
@@ -312,6 +580,14 @@ class WatchmanService:
 
     @staticmethod
     def _is_usable_result_summary(summary_text: str) -> bool:
+        """Is usable result summary.
+
+        Args:
+            summary_text: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if not summary_text:
             return False
         text = summary_text.lower()
@@ -326,5 +602,13 @@ class WatchmanService:
 
     @staticmethod
     def _normalized_dt_key(value: str) -> str:
+        """Normalized dt key.
+
+        Args:
+            value: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         d = WatchmanService._parse_date(value)
         return d.isoformat() if d else ""

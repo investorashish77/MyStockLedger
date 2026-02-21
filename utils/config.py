@@ -12,6 +12,14 @@ class Config:
     
     def __init__(self):
         # Load environment variables
+        """Init.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         env_path = Path(__file__).parent.parent / '.env'
         load_dotenv(env_path)
         
@@ -23,6 +31,17 @@ class Config:
         self.GROQ_API_KEY = os.getenv('GROQ_API_KEY', '')
         self.CLAUDE_API_KEY = os.getenv('CLAUDE_API_KEY', '')
         self.OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
+        self.ANALYST_AI_PROVIDER = os.getenv('ANALYST_AI_PROVIDER', 'groq').strip().lower()
+        self.OLLAMA_BASE_URL = os.getenv('OLLAMA_BASE_URL', 'http://127.0.0.1:11434').strip()
+        self.OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', 'qwen2.5:14b').strip()
+        self.OLLAMA_FALLBACK_MODELS = [
+            model.strip()
+            for model in os.getenv('OLLAMA_FALLBACK_MODELS', '').split(',')
+            if model.strip()
+        ]
+        self.OLLAMA_TIMEOUT_PRIMARY_SEC = int(os.getenv('OLLAMA_TIMEOUT_PRIMARY_SEC', '120'))
+        self.OLLAMA_TIMEOUT_FALLBACK_SEC = int(os.getenv('OLLAMA_TIMEOUT_FALLBACK_SEC', '60'))
+        self.AI_CACHE_ENABLED = os.getenv('AI_CACHE_ENABLED', 'true').lower() == 'true'
         
         # Alert settings
         self.ALERT_CHECK_INTERVAL = int(os.getenv('ALERT_CHECK_INTERVAL', '3600'))
@@ -39,11 +58,11 @@ class Config:
         )
         self.BSE_ATTACH_PRIMARY_BASE = os.getenv(
             'BSE_ATTACH_PRIMARY_BASE',
-            'https://www.bseindia.com/xml-data/corpfiling/AttachLive/'
+            'https://www.bseindia.com/xml-data/corpfiling/AttachHis/'
         ).strip()
         self.BSE_ATTACH_SECONDARY_BASE = os.getenv(
             'BSE_ATTACH_SECONDARY_BASE',
-            'https://www.bseindia.com/xml-data/corpfiling/AttachHis/'
+            'https://www.bseindia.com/xml-data/corpfiling/AttachLive/'
         ).strip()
         self.BSE_HISTORY_START_DATE = os.getenv('BSE_HISTORY_START_DATE', '20260101')
         self.BSE_API_MAX_PAGES = int(os.getenv('BSE_API_MAX_PAGES', '200'))
@@ -53,6 +72,17 @@ class Config:
         self.DEBUG_MODE = os.getenv('DEBUG_MODE', 'True').lower() == 'true'
         self.UI_GLOW_PRESET = os.getenv('UI_GLOW_PRESET', 'medium').strip().lower()
         self.ENABLE_ADMIN_REGENERATE = os.getenv('ENABLE_ADMIN_REGENERATE', 'true').lower() == 'true'
+        self.WATCHMAN_AUTO_RUN_ON_LOGIN = os.getenv('WATCHMAN_AUTO_RUN_ON_LOGIN', 'false').lower() == 'true'
+        self.FILINGS_OVERRIDE_ADMIN_ONLY = os.getenv('FILINGS_OVERRIDE_ADMIN_ONLY', 'true').lower() == 'true'
+        self.ADMIN_USER_IDS = [
+            int(x.strip()) for x in os.getenv('ADMIN_USER_IDS', '').split(',') if x.strip().isdigit()
+        ]
+        self.ADMIN_USER_MOBILES = [
+            x.strip() for x in os.getenv('ADMIN_USER_MOBILES', '').split(',') if x.strip()
+        ]
+        self.SHOW_ONBOARDING_HELP = os.getenv('SHOW_ONBOARDING_HELP', 'true').lower() == 'true'
+        self.NOTIFICATION_POLL_INTERVAL_SEC = int(os.getenv('NOTIFICATION_POLL_INTERVAL_SEC', '8'))
+        self.WATCHMAN_MATERIAL_SCAN_ON_LOGIN = os.getenv('WATCHMAN_MATERIAL_SCAN_ON_LOGIN', 'true').lower() == 'true'
     
     def is_ai_enabled(self):
         """Check if AI features are configured"""
@@ -62,6 +92,8 @@ class Config:
             return bool(self.CLAUDE_API_KEY)
         elif self.AI_PROVIDER == 'openai':
             return bool(self.OPENAI_API_KEY)
+        elif self.AI_PROVIDER == 'ollama':
+            return bool(self.OLLAMA_BASE_URL and self.OLLAMA_MODEL)
         return False
 
 # Global config instance

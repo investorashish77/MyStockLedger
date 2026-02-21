@@ -4,6 +4,7 @@ Handles all database operations for the Equity Tracker app
 """
 
 import sqlite3
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -12,6 +13,14 @@ class DatabaseManager:
     """Manages database operations"""
     
     def __init__(self, db_path: str = 'data/equity_tracker.db'):
+        """Init.
+
+        Args:
+            db_path: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.db_path = db_path
         self._in_memory = db_path == ':memory:'
         self._shared_conn = None
@@ -40,6 +49,15 @@ class DatabaseManager:
         cursor = conn.cursor()
 
         def has_column(table: str, column: str) -> bool:
+            """Has column.
+
+            Args:
+                table: Input parameter.
+                column: Input parameter.
+
+            Returns:
+                Any: Method output for caller use.
+            """
             cursor.execute(f"PRAGMA table_info({table})")
             return any(row[1] == column for row in cursor.fetchall())
 
@@ -99,6 +117,47 @@ class DatabaseManager:
             "CREATE INDEX IF NOT EXISTS idx_insight_snapshots_type ON insight_snapshots(insight_type, quarter_label)"
         )
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS global_insight_snapshots (
+                snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol_id INTEGER NOT NULL,
+                quarter_label TEXT NOT NULL,
+                insight_type TEXT NOT NULL,
+                source_filing_id INTEGER,
+                source_ref TEXT,
+                summary_text TEXT,
+                sentiment TEXT,
+                status TEXT NOT NULL DEFAULT 'GENERATED',
+                provider TEXT,
+                model_version TEXT,
+                generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(symbol_id, quarter_label, insight_type)
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_global_insight_snapshots_symbol_quarter ON global_insight_snapshots(symbol_id, quarter_label)"
+        )
+
+        # Journal V2 transaction fields.
+        if has_column("transactions", "setup_type") is False:
+            cursor.execute("ALTER TABLE transactions ADD COLUMN setup_type TEXT")
+        if has_column("transactions", "confidence_score") is False:
+            cursor.execute("ALTER TABLE transactions ADD COLUMN confidence_score INTEGER")
+        if has_column("transactions", "risk_tags") is False:
+            cursor.execute("ALTER TABLE transactions ADD COLUMN risk_tags TEXT")
+        if has_column("transactions", "mistake_tags") is False:
+            cursor.execute("ALTER TABLE transactions ADD COLUMN mistake_tags TEXT")
+        if has_column("transactions", "reflection_note") is False:
+            cursor.execute("ALTER TABLE transactions ADD COLUMN reflection_note TEXT")
+
+        # Filings category override fields.
+        if has_column("filings", "category_override") is False:
+            cursor.execute("ALTER TABLE filings ADD COLUMN category_override TEXT")
+        if has_column("filings", "override_locked") is False:
+            cursor.execute("ALTER TABLE filings ADD COLUMN override_locked BOOLEAN DEFAULT 0")
+        if has_column("filings", "override_updated_at") is False:
+            cursor.execute("ALTER TABLE filings ADD COLUMN override_updated_at TIMESTAMP")
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS analyst_consensus (
                 consensus_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 stock_id INTEGER NOT NULL UNIQUE,
@@ -111,6 +170,65 @@ class DatabaseManager:
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_analyst_consensus_stock ON analyst_consensus(stock_id)")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ai_response_cache (
+                cache_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_type TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                prompt_hash TEXT NOT NULL,
+                response_text TEXT NOT NULL,
+                sentiment TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(task_type, provider, model, prompt_hash)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ai_response_cache_lookup
+            ON ai_response_cache(task_type, provider, model, prompt_hash)
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS background_jobs (
+                job_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_type TEXT NOT NULL,
+                requested_by INTEGER,
+                status TEXT NOT NULL DEFAULT 'QUEUED',
+                payload_json TEXT,
+                progress INTEGER DEFAULT 0,
+                result_json TEXT,
+                error_message TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                started_at TIMESTAMP,
+                completed_at TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_background_jobs_status_created
+            ON background_jobs(status, created_at)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_background_jobs_requested_by
+            ON background_jobs(requested_by, created_at)
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notifications (
+                notification_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                notif_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                metadata_json TEXT,
+                is_read BOOLEAN DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                read_at TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_notifications_user_read
+            ON notifications(user_id, is_read, created_at)
+        """)
 
         conn.commit()
         self._close_connection(conn)
@@ -178,6 +296,27 @@ class DatabaseManager:
                 'created_at': row[5]
             }
         return None
+
+    def get_user_by_id(self, user_id: int) -> Optional[Dict]:
+        """Get user by user_id."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT user_id, mobile_number, name, email, created_at
+            FROM users WHERE user_id = ?
+            LIMIT 1
+        """, (user_id,))
+        row = cursor.fetchone()
+        self._close_connection(conn)
+        if not row:
+            return None
+        return {
+            'user_id': row[0],
+            'mobile_number': row[1],
+            'name': row[2],
+            'email': row[3],
+            'created_at': row[4]
+        }
     
     # Stock operations
     def add_stock(self, user_id: int, symbol: str, company_name: str, exchange: str = 'NSE') -> int:
@@ -261,10 +400,12 @@ class DatabaseManager:
         ]
     
     # Transaction operations
-    def add_transaction(self, stock_id: int, transaction_type: str, quantity: int, 
-                       price_per_share: float, transaction_date: str, 
-                       investment_horizon: str, target_price: float = None, 
-                       thesis: str = None) -> int:
+    def add_transaction(self, stock_id: int, transaction_type: str, quantity: int,
+                       price_per_share: float, transaction_date: str,
+                       investment_horizon: str, target_price: float = None,
+                       thesis: str = None, setup_type: str = None,
+                       confidence_score: int = None, risk_tags: str = None,
+                       mistake_tags: str = None, reflection_note: str = None) -> int:
         """Add a buy/sell transaction"""
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -272,10 +413,12 @@ class DatabaseManager:
         cursor.execute("""
             INSERT INTO transactions 
             (stock_id, transaction_type, quantity, price_per_share, transaction_date,
-             investment_horizon, target_price, thesis)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             investment_horizon, target_price, thesis, setup_type, confidence_score,
+             risk_tags, mistake_tags, reflection_note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (stock_id, transaction_type, quantity, price_per_share, transaction_date,
-              investment_horizon, target_price, thesis))
+              investment_horizon, target_price, thesis, setup_type, confidence_score,
+              risk_tags, mistake_tags, reflection_note))
         
         transaction_id = cursor.lastrowid
         conn.commit()
@@ -290,7 +433,8 @@ class DatabaseManager:
         
         cursor.execute("""
             SELECT transaction_id, transaction_type, quantity, price_per_share,
-                   transaction_date, investment_horizon, target_price, thesis
+                   transaction_date, investment_horizon, target_price, thesis,
+                   setup_type, confidence_score, risk_tags, mistake_tags, reflection_note
             FROM transactions WHERE stock_id = ?
             ORDER BY transaction_date DESC
         """, (stock_id,))
@@ -305,7 +449,12 @@ class DatabaseManager:
                 'transaction_date': row[4],
                 'investment_horizon': row[5],
                 'target_price': row[6],
-                'thesis': row[7]
+                'thesis': row[7],
+                'setup_type': row[8],
+                'confidence_score': row[9],
+                'risk_tags': row[10],
+                'mistake_tags': row[11],
+                'reflection_note': row[12],
             })
         
         self._close_connection(conn)
@@ -317,7 +466,8 @@ class DatabaseManager:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT s.stock_id, s.symbol, s.company_name,
-                   t.transaction_id, t.transaction_date, t.thesis
+                   t.transaction_id, t.transaction_date, t.thesis,
+                   t.setup_type, t.confidence_score, t.risk_tags, t.mistake_tags, t.reflection_note
             FROM stocks s
             JOIN transactions t ON s.stock_id = t.stock_id
             JOIN (
@@ -343,6 +493,11 @@ class DatabaseManager:
                 "transaction_id": row[3],
                 "transaction_date": row[4],
                 "thesis": row[5],
+                "setup_type": row[6],
+                "confidence_score": row[7],
+                "risk_tags": row[8],
+                "mistake_tags": row[9],
+                "reflection_note": row[10],
             }
             for row in rows
         ]
@@ -524,8 +679,11 @@ class DatabaseManager:
         cursor = conn.cursor()
         
         # Build UPDATE query dynamically based on provided fields
-        valid_fields = ['transaction_type', 'quantity', 'price_per_share', 'transaction_date', 
-                    'investment_horizon', 'target_price', 'thesis']
+        valid_fields = [
+            'transaction_type', 'quantity', 'price_per_share', 'transaction_date',
+            'investment_horizon', 'target_price', 'thesis',
+            'setup_type', 'confidence_score', 'risk_tags', 'mistake_tags', 'reflection_note'
+        ]
         
         update_fields = []
         values = []
@@ -1061,6 +1219,38 @@ class DatabaseManager:
             for row in rows
         ]
 
+    def get_bse_announcements_since_id(self, last_announcement_id: int = 0, limit: int = 5000) -> List[Dict]:
+        """Fetch announcements newer than a given announcement_id in ascending order."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT announcement_id, symbol_id, scrip_code, headline, category, announcement_date,
+                   attachment_url, exchange_ref_id, rss_guid, raw_payload, processed, fetched_at
+            FROM bse_announcements
+            WHERE announcement_id > ?
+            ORDER BY announcement_id ASC
+            LIMIT ?
+        """, (int(last_announcement_id or 0), limit))
+        rows = cursor.fetchall()
+        self._close_connection(conn)
+        return [
+            {
+                'announcement_id': row[0],
+                'symbol_id': row[1],
+                'scrip_code': row[2],
+                'headline': row[3],
+                'category': row[4],
+                'announcement_date': row[5],
+                'attachment_url': row[6],
+                'exchange_ref_id': row[7],
+                'rss_guid': row[8],
+                'raw_payload': row[9],
+                'processed': bool(row[10]),
+                'fetched_at': row[11]
+            }
+            for row in rows
+        ]
+
     def get_bse_announcements_by_scrip_codes(self, scrip_codes: List[str], limit: int = 5000) -> List[Dict]:
         """Fetch latest BSE announcements for provided BSE scrip codes."""
         normalized = [str(code).strip() for code in (scrip_codes or []) if str(code).strip()]
@@ -1198,7 +1388,8 @@ class DatabaseManager:
 
         query = """
             SELECT f.filing_id, f.category, f.headline, f.announcement_summary, f.announcement_date,
-                   f.pdf_link, f.source_exchange, f.source_ref,
+                   f.pdf_link, f.source_exchange, f.source_ref, f.symbol_id,
+                   f.category_override, f.override_locked, COALESCE(f.category_override, f.category) AS effective_category,
                    s.stock_id, s.symbol, s.company_name, s.exchange,
                    sm.bse_code, sm.nse_code, sm.sector
             FROM filings f
@@ -1213,7 +1404,7 @@ class DatabaseManager:
             query += " AND s.stock_id = ?"
             params.append(stock_id)
         if category and category != "ALL":
-            query += " AND f.category = ?"
+            query += " AND COALESCE(f.category_override, f.category) = ?"
             params.append(category)
 
         query += " ORDER BY f.announcement_date DESC, f.filing_id DESC LIMIT ?"
@@ -1232,16 +1423,36 @@ class DatabaseManager:
                 'pdf_link': row[5],
                 'source_exchange': row[6],
                 'source_ref': row[7],
-                'stock_id': row[8],
-                'symbol': row[9],
-                'company_name': row[10],
-                'exchange': row[11],
-                'bse_code': row[12],
-                'nse_code': row[13],
-                'industry': row[14],
+                'symbol_id': row[8],
+                'category_override': row[9],
+                'override_locked': bool(row[10]) if row[10] is not None else False,
+                'effective_category': row[11],
+                'stock_id': row[12],
+                'symbol': row[13],
+                'company_name': row[14],
+                'exchange': row[15],
+                'bse_code': row[16],
+                'nse_code': row[17],
+                'industry': row[18],
             }
             for row in rows
         ]
+
+    def set_filing_category_override(self, filing_id: int, category_override: Optional[str], locked: bool = True) -> bool:
+        """Set/clear filing category override."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE filings
+            SET category_override = ?,
+                override_locked = ?,
+                override_updated_at = CURRENT_TIMESTAMP
+            WHERE filing_id = ?
+        """, (category_override, 1 if locked else 0, filing_id))
+        conn.commit()
+        changed = cursor.rowcount > 0
+        self._close_connection(conn)
+        return changed
 
     # Insight snapshot operations
     def upsert_insight_snapshot(
@@ -1363,6 +1574,131 @@ class DatabaseManager:
             for row in rows
         ]
 
+    # Global insight snapshot operations (shared across users)
+    def upsert_global_insight_snapshot(
+        self,
+        symbol_id: int,
+        quarter_label: str,
+        insight_type: str,
+        summary_text: str = None,
+        sentiment: str = None,
+        status: str = "GENERATED",
+        source_filing_id: int = None,
+        source_ref: str = None,
+        provider: str = None,
+        model_version: str = None,
+    ) -> int:
+        """Insert/update one shared quarter insight snapshot and return snapshot_id."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO global_insight_snapshots
+            (symbol_id, quarter_label, insight_type, source_filing_id, source_ref, summary_text, sentiment,
+             status, provider, model_version, generated_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(symbol_id, quarter_label, insight_type) DO UPDATE SET
+                source_filing_id = COALESCE(excluded.source_filing_id, global_insight_snapshots.source_filing_id),
+                source_ref = COALESCE(excluded.source_ref, global_insight_snapshots.source_ref),
+                summary_text = COALESCE(excluded.summary_text, global_insight_snapshots.summary_text),
+                sentiment = COALESCE(excluded.sentiment, global_insight_snapshots.sentiment),
+                status = COALESCE(excluded.status, global_insight_snapshots.status),
+                provider = COALESCE(excluded.provider, global_insight_snapshots.provider),
+                model_version = COALESCE(excluded.model_version, global_insight_snapshots.model_version),
+                updated_at = CURRENT_TIMESTAMP
+        """, (
+            symbol_id, quarter_label, insight_type, source_filing_id, source_ref, summary_text, sentiment,
+            status, provider, model_version
+        ))
+        conn.commit()
+        cursor.execute("""
+            SELECT snapshot_id
+            FROM global_insight_snapshots
+            WHERE symbol_id = ? AND quarter_label = ? AND insight_type = ?
+            LIMIT 1
+        """, (symbol_id, quarter_label, insight_type))
+        row = cursor.fetchone()
+        self._close_connection(conn)
+        return row[0]
+
+    def get_global_insight_snapshot(self, symbol_id: int, quarter_label: str, insight_type: str) -> Optional[Dict]:
+        """Get one global insight snapshot if exists."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT snapshot_id, symbol_id, quarter_label, insight_type, source_filing_id, source_ref,
+                   summary_text, sentiment, status, provider, model_version, generated_at, updated_at
+            FROM global_insight_snapshots
+            WHERE symbol_id = ? AND quarter_label = ? AND insight_type = ?
+            LIMIT 1
+        """, (symbol_id, quarter_label, insight_type))
+        row = cursor.fetchone()
+        self._close_connection(conn)
+        if not row:
+            return None
+        return {
+            "snapshot_id": row[0],
+            "symbol_id": row[1],
+            "quarter_label": row[2],
+            "insight_type": row[3],
+            "source_filing_id": row[4],
+            "source_ref": row[5],
+            "summary_text": row[6],
+            "sentiment": row[7],
+            "status": row[8],
+            "provider": row[9],
+            "model_version": row[10],
+            "generated_at": row[11],
+            "updated_at": row[12],
+        }
+
+    def get_user_global_insight_snapshots(self, user_id: int, quarter_label: str = None, limit: int = 500) -> List[Dict]:
+        """List shared insight snapshots for companies in user's portfolio."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        query = """
+            SELECT gi.snapshot_id, gi.symbol_id, gi.quarter_label, gi.insight_type,
+                   gi.source_filing_id, gi.source_ref, gi.summary_text, gi.sentiment,
+                   gi.status, gi.provider, gi.model_version, gi.generated_at, gi.updated_at,
+                   s.stock_id, s.symbol, s.company_name, s.exchange
+            FROM stocks s
+            LEFT JOIN symbol_master sm
+                ON sm.symbol = s.symbol
+               OR sm.symbol = REPLACE(REPLACE(UPPER(s.symbol), '.NS', ''), '.BO', '')
+            JOIN global_insight_snapshots gi ON gi.symbol_id = sm.symbol_id
+            WHERE s.user_id = ?
+        """
+        params = [user_id]
+        if quarter_label:
+            query += " AND gi.quarter_label = ?"
+            params.append(quarter_label)
+        query += " ORDER BY gi.quarter_label DESC, s.symbol ASC, gi.insight_type ASC LIMIT ?"
+        params.append(limit)
+        cursor.execute(query, tuple(params))
+        rows = cursor.fetchall()
+        self._close_connection(conn)
+        return [
+            {
+                "snapshot_id": row[0],
+                "symbol_id": row[1],
+                "quarter_label": row[2],
+                "insight_type": row[3],
+                "source_filing_id": row[4],
+                "source_ref": row[5],
+                "summary_text": row[6],
+                "sentiment": row[7],
+                "status": row[8],
+                "provider": row[9],
+                "model_version": row[10],
+                "generated_at": row[11],
+                "updated_at": row[12],
+                "stock_id": row[13],
+                "symbol": row[14],
+                "company_name": row[15],
+                "exchange": row[16],
+            }
+            for row in rows
+        ]
+
     def get_latest_filing_dates_by_stock(self, user_id: int) -> Dict[int, str]:
         """Return latest announcement_date string per stock in user portfolio."""
         conn = self.get_connection()
@@ -1437,6 +1773,61 @@ class DatabaseManager:
             "updated_at": row[7],
         }
 
+    # AI cache operations
+    def get_ai_response_cache(self, task_type: str, provider: str, model: str, prompt_hash: str) -> Optional[Dict]:
+        """Get cached AI response by task/provider/model/prompt hash."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT cache_id, response_text, sentiment, created_at, updated_at
+            FROM ai_response_cache
+            WHERE task_type = ? AND provider = ? AND model = ? AND prompt_hash = ?
+            LIMIT 1
+        """, (task_type, provider, model, prompt_hash))
+        row = cursor.fetchone()
+        self._close_connection(conn)
+        if not row:
+            return None
+        return {
+            "cache_id": row[0],
+            "response_text": row[1],
+            "sentiment": row[2],
+            "created_at": row[3],
+            "updated_at": row[4],
+        }
+
+    def upsert_ai_response_cache(
+        self,
+        task_type: str,
+        provider: str,
+        model: str,
+        prompt_hash: str,
+        response_text: str,
+        sentiment: str = None,
+    ) -> int:
+        """Insert/update cached AI response and return cache_id."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO ai_response_cache
+            (task_type, provider, model, prompt_hash, response_text, sentiment, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(task_type, provider, model, prompt_hash) DO UPDATE SET
+                response_text = excluded.response_text,
+                sentiment = COALESCE(excluded.sentiment, ai_response_cache.sentiment),
+                updated_at = CURRENT_TIMESTAMP
+        """, (task_type, provider, model, prompt_hash, response_text, sentiment))
+        conn.commit()
+        cursor.execute("""
+            SELECT cache_id
+            FROM ai_response_cache
+            WHERE task_type = ? AND provider = ? AND model = ? AND prompt_hash = ?
+            LIMIT 1
+        """, (task_type, provider, model, prompt_hash))
+        row = cursor.fetchone()
+        self._close_connection(conn)
+        return row[0]
+
     def get_transaction_by_id(self, transaction_id: int) -> Optional[Dict]:
         '''Get a single transaction by ID'''
         conn = self.get_connection()
@@ -1445,7 +1836,8 @@ class DatabaseManager:
         cursor.execute('''
             SELECT transaction_id, stock_id, transaction_type, quantity, 
                 price_per_share, transaction_date, investment_horizon,
-                target_price, thesis
+                target_price, thesis, setup_type, confidence_score,
+                risk_tags, mistake_tags, reflection_note
             FROM transactions WHERE transaction_id = ?
         ''', (transaction_id,))
         
@@ -1462,7 +1854,12 @@ class DatabaseManager:
                 'transaction_date': row[5],
                 'investment_horizon': row[6],
                 'target_price': row[7],
-                'thesis': row[8]
+                'thesis': row[8],
+                'setup_type': row[9],
+                'confidence_score': row[10],
+                'risk_tags': row[11],
+                'mistake_tags': row[12],
+                'reflection_note': row[13],
             }
         return None
 
@@ -1487,6 +1884,212 @@ class DatabaseManager:
                 value = excluded.value,
                 updated_at = CURRENT_TIMESTAMP
         """, (key, value))
+        conn.commit()
+        self._close_connection(conn)
+
+    # Background jobs
+    def enqueue_background_job(self, job_type: str, requested_by: Optional[int], payload: Optional[Dict] = None) -> int:
+        """Queue a background job and return job_id."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        payload_json = json.dumps(payload or {})
+        cursor.execute("""
+            INSERT INTO background_jobs
+            (job_type, requested_by, status, payload_json, progress, created_at, updated_at)
+            VALUES (?, ?, 'QUEUED', ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """, (job_type, requested_by, payload_json))
+        job_id = cursor.lastrowid
+        conn.commit()
+        self._close_connection(conn)
+        return job_id
+
+    def claim_next_background_job(self) -> Optional[Dict]:
+        """Atomically claim next queued background job."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute("""
+            SELECT job_id
+            FROM background_jobs
+            WHERE status = 'QUEUED'
+            ORDER BY created_at ASC, job_id ASC
+            LIMIT 1
+        """)
+        row = cursor.fetchone()
+        if not row:
+            conn.commit()
+            self._close_connection(conn)
+            return None
+        job_id = row[0]
+        cursor.execute("""
+            UPDATE background_jobs
+            SET status = 'RUNNING',
+                started_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE job_id = ?
+        """, (job_id,))
+        cursor.execute("""
+            SELECT job_id, job_type, requested_by, status, payload_json, progress,
+                   result_json, error_message, created_at, started_at, completed_at, updated_at
+            FROM background_jobs
+            WHERE job_id = ?
+        """, (job_id,))
+        job_row = cursor.fetchone()
+        conn.commit()
+        self._close_connection(conn)
+        if not job_row:
+            return None
+        payload = {}
+        if job_row[4]:
+            try:
+                payload = json.loads(job_row[4])
+            except Exception:
+                payload = {}
+        return {
+            "job_id": job_row[0],
+            "job_type": job_row[1],
+            "requested_by": job_row[2],
+            "status": job_row[3],
+            "payload": payload,
+            "progress": job_row[5],
+            "result_json": job_row[6],
+            "error_message": job_row[7],
+            "created_at": job_row[8],
+            "started_at": job_row[9],
+            "completed_at": job_row[10],
+            "updated_at": job_row[11],
+        }
+
+    def complete_background_job(
+        self,
+        job_id: int,
+        status: str,
+        progress: int = 100,
+        result: Optional[Dict] = None,
+        error_message: Optional[str] = None
+    ) -> None:
+        """Complete a running job with SUCCESS or FAILED."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE background_jobs
+            SET status = ?,
+                progress = ?,
+                result_json = ?,
+                error_message = ?,
+                completed_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE job_id = ?
+        """, (
+            status,
+            max(0, min(int(progress), 100)),
+            json.dumps(result or {}) if result is not None else None,
+            error_message,
+            job_id
+        ))
+        conn.commit()
+        self._close_connection(conn)
+
+    # Notifications
+    def add_notification(
+        self,
+        user_id: Optional[int],
+        notif_type: str,
+        title: str,
+        message: str,
+        metadata: Optional[Dict] = None
+    ) -> int:
+        """Create a user/global notification."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO notifications
+            (user_id, notif_type, title, message, metadata_json, is_read, created_at)
+            VALUES (?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
+        """, (
+            user_id,
+            notif_type,
+            title,
+            message,
+            json.dumps(metadata or {}) if metadata is not None else None,
+        ))
+        notif_id = cursor.lastrowid
+        conn.commit()
+        self._close_connection(conn)
+        return notif_id
+
+    def get_user_notifications(self, user_id: int, unread_only: bool = False, limit: int = 100) -> List[Dict]:
+        """List notifications for user (including global notifications)."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        query = """
+            SELECT notification_id, user_id, notif_type, title, message, metadata_json, is_read, created_at, read_at
+            FROM notifications
+            WHERE (user_id = ? OR user_id IS NULL)
+        """
+        params = [user_id]
+        if unread_only:
+            query += " AND is_read = 0"
+        query += " ORDER BY created_at DESC, notification_id DESC LIMIT ?"
+        params.append(limit)
+        cursor.execute(query, tuple(params))
+        rows = cursor.fetchall()
+        self._close_connection(conn)
+        out = []
+        for row in rows:
+            metadata = {}
+            if row[5]:
+                try:
+                    metadata = json.loads(row[5])
+                except Exception:
+                    metadata = {}
+            out.append({
+                "notification_id": row[0],
+                "user_id": row[1],
+                "notif_type": row[2],
+                "title": row[3],
+                "message": row[4],
+                "metadata": metadata,
+                "is_read": bool(row[6]),
+                "created_at": row[7],
+                "read_at": row[8],
+            })
+        return out
+
+    def get_unread_notifications_count(self, user_id: int) -> int:
+        """Count unread notifications for user (including global)."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*)
+            FROM notifications
+            WHERE (user_id = ? OR user_id IS NULL) AND is_read = 0
+        """, (user_id,))
+        row = cursor.fetchone()
+        self._close_connection(conn)
+        return int(row[0] if row else 0)
+
+    def mark_notification_read(self, notification_id: int) -> None:
+        """Mark one notification as read."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE notifications
+            SET is_read = 1, read_at = CURRENT_TIMESTAMP
+            WHERE notification_id = ?
+        """, (notification_id,))
+        conn.commit()
+        self._close_connection(conn)
+
+    def mark_all_notifications_read(self, user_id: int) -> None:
+        """Mark all user/global notifications as read for a user."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE notifications
+            SET is_read = 1, read_at = CURRENT_TIMESTAMP
+            WHERE (user_id = ? OR user_id IS NULL) AND is_read = 0
+        """, (user_id,))
         conn.commit()
         self._close_connection(conn)
 

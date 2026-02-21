@@ -5,15 +5,18 @@ The main application window with portfolio, alerts, and settings
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QStackedWidget, QLabel, QPushButton, QMessageBox,
-                             QStatusBar, QMenuBar, QMenu, QAction, QDialog, QFrame, QSlider, QGraphicsDropShadowEffect)
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QFont, QPixmap, QIcon, QColor
+                             QStatusBar, QMenuBar, QMenu, QAction, QDialog, QFrame, QSlider, QGraphicsDropShadowEffect,
+                             QListWidget, QListWidgetItem)
+from PyQt5.QtCore import Qt, QTimer, QUrl
+from PyQt5.QtGui import QFont, QPixmap, QIcon, QColor, QDesktopServices
 from pathlib import Path
 from time import perf_counter
+import re
 from database.db_manager import DatabaseManager
 from services.stock_service import StockService
 from services.alert_service import AlertService
 from services.ai_summary_service import AISummaryService
+from services.background_job_service import BackgroundJobService
 from ui.login_dialog import LoginDialog
 from ui.dashboard_view import DashboardView
 from ui.portfolio_view import PortfolioView
@@ -26,6 +29,14 @@ class MainWindow(QMainWindow):
     """Main application window"""
     
     def __init__(self):
+        """Init.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         super().__init__()
         self.logger = get_logger(__name__)
         init_t0 = perf_counter()
@@ -35,7 +46,9 @@ class MainWindow(QMainWindow):
         self.db = DatabaseManager()
         self.stock_service = StockService()
         self.alert_service = AlertService(self.db)
-        self.ai_service = AISummaryService()
+        self.ai_service = AISummaryService(self.db)
+        self.background_jobs = BackgroundJobService(self.db, self.ai_service)
+        self.background_jobs.start()
         self.logger.info("MainWindow services initialized in %.2fs", perf_counter() - t0)
         
         # User data
@@ -105,7 +118,7 @@ class MainWindow(QMainWindow):
         self.dashboard_view = DashboardView(self.db, self.stock_service, self.ai_service, show_kpis=False)
         self.portfolio_view = PortfolioView(self.db, self.stock_service)
         self.alerts_view = AlertsView(self.db, self.alert_service, self.ai_service)
-        self.insights_view = InsightsView(self.db, self.alert_service, self.ai_service)
+        self.insights_view = InsightsView(self.db, self.alert_service, self.ai_service, self.background_jobs)
 
         self.content_stack.addWidget(self.dashboard_view)
         self.content_stack.addWidget(self.portfolio_view)
@@ -122,6 +135,14 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _build_kpi_card(title: str) -> QFrame:
+        """Build kpi card.
+
+        Args:
+            title: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         card = QFrame()
         card.setObjectName("kpiCard")
         layout = QVBoxLayout()
@@ -220,6 +241,10 @@ class MainWindow(QMainWindow):
         
         # Help menu
         help_menu = menubar.addMenu('&Help')
+
+        onboarding_action = QAction('&Onboarding Checklist', self)
+        onboarding_action.triggered.connect(lambda: self.show_onboarding_checklist(force=True))
+        help_menu.addAction(onboarding_action)
         
         about_action = QAction('&About', self)
         about_action.triggered.connect(self.show_about)
@@ -266,6 +291,17 @@ class MainWindow(QMainWindow):
         self.theme_toggle.valueChanged.connect(self.toggle_theme)
         self.theme_toggle.setValue(1)
         layout.addWidget(self.theme_toggle)
+
+        self.notif_bell_btn = QPushButton("🔔")
+        self.notif_bell_btn.setObjectName("actionBlendBtn")
+        self.notif_bell_btn.setFixedWidth(44)
+        self.notif_bell_btn.clicked.connect(self.open_notifications_panel)
+        layout.addWidget(self.notif_bell_btn)
+
+        self.notif_badge = QLabel("0")
+        self.notif_badge.setObjectName("notifBadge")
+        self.notif_badge.setVisible(False)
+        layout.addWidget(self.notif_badge)
         
         # AI status indicator
         self.ai_status_label = QLabel()
@@ -310,7 +346,16 @@ class MainWindow(QMainWindow):
         self.welcome_label.setText(f"Welcome, {user_data['name']}! 👋")
         self.logger.info("Login successful for user_id=%s", user_data.get("user_id"))
         self.status_bar.showMessage(f"Logged in as {user_data['name']}", 3000)
-        QTimer.singleShot(1800, self._run_daily_watchman_if_due)
+        if config.WATCHMAN_MATERIAL_SCAN_ON_LOGIN:
+            try:
+                job_id = self.background_jobs.enqueue_material_scan_job(user_data["user_id"], daily_only=True)
+                self.logger.info("Queued daily material-scan job_id=%s for user_id=%s", job_id, user_data.get("user_id"))
+            except Exception as exc:
+                self.logger.error("Failed to queue material-scan job for user_id=%s: %s", user_data.get("user_id"), exc)
+        if config.SHOW_ONBOARDING_HELP:
+            QTimer.singleShot(700, self.show_onboarding_checklist)
+        if config.WATCHMAN_AUTO_RUN_ON_LOGIN:
+            QTimer.singleShot(1800, self._run_daily_watchman_if_due)
 
     def _schedule_post_login_refresh(self):
         """Run a fast refresh first, then a live-price refresh after UI is visible."""
@@ -326,6 +371,7 @@ class MainWindow(QMainWindow):
             use_live_quotes=True,
             reason="startup-live"
         ))
+        self.start_notification_polling()
 
     def _run_daily_watchman_if_due(self):
         """Trigger daily quarter-insight generation on first login of day."""
@@ -342,6 +388,7 @@ class MainWindow(QMainWindow):
                 f"Insights updated: +{result['generated']} (missing:{result['not_available']}, failed:{result['failed']})",
                 5000
             )
+            self.refresh_notifications()
         except Exception as exc:
             self.logger.error("Daily watchman run failed: %s", exc)
     
@@ -398,6 +445,15 @@ class MainWindow(QMainWindow):
             self._is_refreshing = False
 
     def update_global_kpis(self, user_id: int, use_live_quotes: bool = True):
+        """Update global kpis.
+
+        Args:
+            user_id: Input parameter.
+            use_live_quotes: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         portfolio = self.db.get_portfolio_summary(user_id)
         total_invested = 0.0
         total_current = 0.0
@@ -442,6 +498,16 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _set_kpi_value(card: QFrame, value: float, pct: float):
+        """Set kpi value.
+
+        Args:
+            card: Input parameter.
+            value: Input parameter.
+            pct: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         color = "#4ADE80" if value >= 0 else "#FB7185"
         card._value.setText(f"₹{value:,.2f}")
         card._value.setStyleSheet(f"color: {color};")
@@ -449,6 +515,14 @@ class MainWindow(QMainWindow):
         card._sub.setStyleSheet(f"color: {color};")
 
     def _apply_depth_effects(self):
+        """Apply depth effects.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         preset = self._shadow_preset()
         self._apply_shadow(self.sidebar, blur=preset["panel_blur"], y_offset=preset["panel_offset"], alpha=preset["panel_alpha"])
         self._apply_shadow(
@@ -478,6 +552,14 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _shadow_preset():
+        """Shadow preset.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         presets = {
             "subtle": {
                 "panel_blur": 20, "panel_offset": 4, "panel_alpha": 80,
@@ -499,6 +581,17 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _apply_shadow(widget, blur: int, y_offset: int, alpha: int):
+        """Apply shadow.
+
+        Args:
+            widget: Input parameter.
+            blur: Input parameter.
+            y_offset: Input parameter.
+            alpha: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         effect = QGraphicsDropShadowEffect()
         effect.setBlurRadius(blur)
         effect.setOffset(0, y_offset)
@@ -528,6 +621,188 @@ class MainWindow(QMainWindow):
         
         QMessageBox.about(self, "About", about_text)
 
+    def start_notification_polling(self):
+        """Start notification polling.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
+        if hasattr(self, "notification_timer") and self.notification_timer is not None:
+            return
+        self.notification_timer = QTimer(self)
+        self.notification_timer.timeout.connect(self.refresh_notifications)
+        self.notification_timer.start(max(2000, config.NOTIFICATION_POLL_INTERVAL_SEC * 1000))
+        self.refresh_notifications()
+
+    def refresh_notifications(self):
+        """Refresh notifications.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
+        if not self.current_user:
+            self.notif_badge.setVisible(False)
+            self.notif_bell_btn.setStyleSheet("")
+            return
+        unread = self.db.get_unread_notifications_count(self.current_user["user_id"])
+        self.notif_badge.setText(str(unread))
+        self.notif_badge.setVisible(unread > 0)
+        if unread > 0:
+            self.notif_bell_btn.setStyleSheet("color: #4ADE80; font-weight:700;")
+        else:
+            self.notif_bell_btn.setStyleSheet("")
+
+    def open_notifications_panel(self):
+        """Open notifications panel.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
+        if not self.current_user:
+            return
+        notifications = self.db.get_user_notifications(self.current_user["user_id"], unread_only=False, limit=100)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Notifications")
+        dialog.resize(640, 420)
+        self._apply_active_theme(dialog)
+        layout = QVBoxLayout(dialog)
+        list_widget = QListWidget()
+        notice = QLabel("Tip: Double-click a notification to open filing link (if available).")
+        layout.addWidget(notice)
+        row_map = []
+        for n in notifications:
+            prefix = "● " if not n.get("is_read") else ""
+            item = QListWidgetItem(
+                f"{prefix}{n.get('created_at')} | {n.get('title')}\n{n.get('message')}"
+            )
+            if not n.get("is_read"):
+                item.setForeground(self.palette().highlight())
+            list_widget.addItem(item)
+            row_map.append(n)
+        list_widget.itemDoubleClicked.connect(lambda item, rows=row_map, lw=list_widget: self._open_notification_link(item, rows, lw))
+        layout.addWidget(list_widget)
+
+        btn_row = QHBoxLayout()
+        open_btn = QPushButton("Open Link")
+        open_btn.clicked.connect(lambda: self._open_selected_notification_link(row_map, list_widget))
+        btn_row.addWidget(open_btn)
+        mark_read_btn = QPushButton("Mark All Read")
+        mark_read_btn.clicked.connect(lambda: self._mark_all_notifications_read(dialog))
+        btn_row.addWidget(mark_read_btn)
+        btn_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+        dialog.exec_()
+
+    def _open_notification_link(self, item: QListWidgetItem, rows: list, list_widget: QListWidget):
+        """Open detail URL from notification metadata when user double-clicks list row."""
+        row = list_widget.row(item)
+        if row < 0 or row >= len(rows):
+            return
+        if not self._open_notification_urls(rows[row]):
+            QMessageBox.information(self, "No Link", "No valid filing URL found for this notification.")
+            return
+
+    def _open_selected_notification_link(self, rows: list, list_widget: QListWidget):
+        """Open link for currently selected notification row."""
+        row = list_widget.currentRow()
+        if row < 0 or row >= len(rows):
+            QMessageBox.information(self, "Select Notification", "Select a notification first.")
+            return
+        if not self._open_notification_urls(rows[row]):
+            QMessageBox.information(self, "No Link", "No valid filing URL found for selected notification.")
+
+    def _open_notification_urls(self, notification: dict) -> bool:
+        """Try opening primary/alternate URL candidates from notification metadata/message."""
+        for raw in self._extract_notification_url_candidates(notification):
+            url = self._normalize_possible_filing_url(raw)
+            if not url:
+                continue
+            if QDesktopServices.openUrl(QUrl(url)):
+                return True
+        return False
+
+    def _extract_notification_url_candidates(self, notification: dict) -> list:
+        """Collect URL candidates from metadata first, then message text."""
+        metadata = notification.get("metadata") or {}
+        candidates = []
+        for key in ("detail_url", "alternate_url"):
+            val = (metadata.get(key) or "").strip()
+            if val:
+                candidates.append(val)
+        msg = notification.get("message") or ""
+        for match in re.findall(r"https?://[^\s)]+", msg):
+            candidates.append(match.strip())
+        # Support legacy messages that stored only a filename.
+        for match in re.findall(r"[A-Za-z0-9_-]+(?:-[A-Za-z0-9_-]+)*\.pdf", msg, flags=re.IGNORECASE):
+            candidates.append(match.strip())
+        return candidates
+
+    @staticmethod
+    def _normalize_possible_filing_url(value: str) -> str:
+        """Normalize URL/filename into browser-openable BSE filing URL."""
+        raw = (value or "").strip().strip(").,]")
+        if not raw:
+            return ""
+        if raw.startswith("http://") or raw.startswith("https://"):
+            return raw
+        if raw.lower().endswith(".pdf"):
+            base = config.BSE_ATTACH_PRIMARY_BASE.strip()
+            if not base.endswith("/"):
+                base = f"{base}/"
+            return f"{base}{raw.split('/')[-1]}"
+        if raw.startswith("/"):
+            return f"https://www.bseindia.com{raw}"
+        return ""
+
+    def _mark_all_notifications_read(self, dialog: QDialog):
+        """Mark all notifications read.
+
+        Args:
+            dialog: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
+        if not self.current_user:
+            return
+        self.db.mark_all_notifications_read(self.current_user["user_id"])
+        self.refresh_notifications()
+        dialog.accept()
+
+    def show_onboarding_checklist(self, force: bool = False):
+        """Show first-run onboarding checklist from Help section."""
+        if not self.current_user:
+            return
+        setting_key = f"onboarding_checklist_seen_user_{self.current_user['user_id']}"
+        already_seen = self.db.get_setting(setting_key, "0") == "1"
+        if already_seen and not force:
+            return
+
+        text = """
+        <h3>Quick Start Checklist</h3>
+        <ol>
+            <li>Add transactions from <b>Portfolio</b> with setup/confidence and notes.</li>
+            <li>Open <b>Filings</b> and click <b>Sync Filings</b> to ingest latest announcements.</li>
+            <li>Use <b>Insights</b> to review quarter summaries for Results and Earnings Call.</li>
+            <li>Review <b>Journal Notes</b> in Dashboard and update reflections regularly.</li>
+            <li>Use dark/light toggle; default mode is <b>Dark Theme</b>.</li>
+        </ol>
+        """
+        QMessageBox.information(self, "Onboarding Checklist", text)
+        self.db.set_setting(setting_key, "1")
+
     def apply_theme(self):
         """Load and apply app stylesheet from assets folder."""
         css_name = "theme_dark.qss" if self.current_theme == "dark" else "theme_light.qss"
@@ -550,6 +825,14 @@ class MainWindow(QMainWindow):
             self.theme_toggle.blockSignals(False)
 
     def toggle_theme(self, checked=False):
+        """Toggle theme.
+
+        Args:
+            checked: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if isinstance(checked, bool):
             self.current_theme = "dark" if checked else "light"
         elif isinstance(checked, int):
@@ -559,6 +842,14 @@ class MainWindow(QMainWindow):
         self.apply_theme()
 
     def _apply_branding_for_theme(self):
+        """Apply branding for theme.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         logo_path = self._logo_file_for_theme()
         if logo_path.exists():
             pixmap = QPixmap(str(logo_path)).scaled(26, 26, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -567,7 +858,26 @@ class MainWindow(QMainWindow):
         else:
             self.logo_label.clear()
 
+    def _apply_active_theme(self, widget: QWidget):
+        """Apply active theme.
+
+        Args:
+            widget: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
+        widget.setStyleSheet(self.styleSheet())
+
     def _logo_file_for_theme(self) -> Path:
+        """Logo file for theme.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         images_dir = Path(__file__).resolve().parent.parent / "assets" / "images"
         candidates = (
             ["equityjournal_logo_dark.png", "logo_dark_theme.png"]
@@ -591,6 +901,7 @@ class MainWindow(QMainWindow):
         )
         
         if reply == QMessageBox.Yes:
+            self.background_jobs.stop()
             event.accept()
         else:
             event.ignore()

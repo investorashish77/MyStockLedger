@@ -30,6 +30,11 @@ CREATE TABLE IF NOT EXISTS transactions (
     investment_horizon TEXT,
     target_price REAL,
     thesis TEXT,
+    setup_type TEXT,
+    confidence_score INTEGER,
+    risk_tags TEXT,
+    mistake_tags TEXT,
+    reflection_note TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (stock_id) REFERENCES stocks(stock_id)
 );
@@ -170,6 +175,9 @@ CREATE TABLE IF NOT EXISTS filings (
     stock_id INTEGER NOT NULL,
     symbol_id INTEGER,
     category TEXT NOT NULL,
+    category_override TEXT,
+    override_locked BOOLEAN DEFAULT 0,
+    override_updated_at TIMESTAMP,
     headline TEXT NOT NULL,
     announcement_summary TEXT,
     announcement_date TEXT,
@@ -206,6 +214,68 @@ CREATE TABLE IF NOT EXISTS insight_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_insight_snapshots_stock_quarter ON insight_snapshots(stock_id, quarter_label);
 CREATE INDEX IF NOT EXISTS idx_insight_snapshots_type ON insight_snapshots(insight_type, quarter_label);
+
+-- Global insight snapshots shared across users (one per company+quarter+insight type)
+CREATE TABLE IF NOT EXISTS global_insight_snapshots (
+    snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol_id INTEGER NOT NULL,
+    quarter_label TEXT NOT NULL,
+    insight_type TEXT NOT NULL,            -- RESULT_SUMMARY / CONCALL_SUMMARY
+    source_filing_id INTEGER,
+    source_ref TEXT,
+    summary_text TEXT,
+    sentiment TEXT,
+    status TEXT NOT NULL DEFAULT 'GENERATED',
+    provider TEXT,
+    model_version TEXT,
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (symbol_id) REFERENCES symbol_master(symbol_id),
+    FOREIGN KEY (source_filing_id) REFERENCES filings(filing_id),
+    UNIQUE(symbol_id, quarter_label, insight_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_global_insight_snapshots_symbol_quarter
+    ON global_insight_snapshots(symbol_id, quarter_label);
+
+-- Background job queue for non-blocking long-running tasks
+CREATE TABLE IF NOT EXISTS background_jobs (
+    job_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_type TEXT NOT NULL,                     -- GENERATE_MISSING_INSIGHTS / REGENERATE_INSIGHTS
+    requested_by INTEGER,
+    status TEXT NOT NULL DEFAULT 'QUEUED',      -- QUEUED / RUNNING / SUCCESS / FAILED
+    payload_json TEXT,
+    progress INTEGER DEFAULT 0,
+    result_json TEXT,
+    error_message TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (requested_by) REFERENCES users(user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_background_jobs_status_created
+    ON background_jobs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_background_jobs_requested_by
+    ON background_jobs(requested_by, created_at);
+
+-- User notifications (for job completion and future features)
+CREATE TABLE IF NOT EXISTS notifications (
+    notification_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,                            -- null => global/system
+    notif_type TEXT NOT NULL,                   -- INSIGHTS_READY / INSIGHTS_FAILED / SYSTEM
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    metadata_json TEXT,
+    is_read BOOLEAN DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    read_at TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_user_read
+    ON notifications(user_id, is_read, created_at);
 
 -- Generic app settings for sync cursors/feature flags
 CREATE TABLE IF NOT EXISTS app_settings (
@@ -247,3 +317,20 @@ CREATE TABLE IF NOT EXISTS analyst_consensus (
 );
 
 CREATE INDEX IF NOT EXISTS idx_analyst_consensus_stock ON analyst_consensus(stock_id);
+
+-- AI response cache keyed by prompt hash/provider/model/task
+CREATE TABLE IF NOT EXISTS ai_response_cache (
+    cache_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_type TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_hash TEXT NOT NULL,
+    response_text TEXT NOT NULL,
+    sentiment TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(task_type, provider, model, prompt_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_response_cache_lookup
+    ON ai_response_cache(task_type, provider, model, prompt_hash);

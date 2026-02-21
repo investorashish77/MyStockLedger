@@ -104,6 +104,16 @@ QLabel#themeLabel {
     font-weight: 600;
 }
 
+QLabel#notifBadge {
+    background: #16A34A;
+    color: #FFFFFF;
+    border-radius: 8px;
+    padding: 1px 6px;
+    font-size: 11px;
+    font-weight: 700;
+    min-width: 16px;
+}
+
 QSlider#themeToggle {
     min-width: 58px;
     max-width: 58px;

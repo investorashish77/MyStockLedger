@@ -13,6 +13,7 @@ from database.db_manager import DatabaseManager
 from services.ai_summary_service import AISummaryService
 from services.alert_service import AlertService
 from services.watchman_service import WatchmanService
+from services.background_job_service import BackgroundJobService
 from ui.summary_dialog import SummaryDialog
 from utils.config import config
 
@@ -20,20 +21,47 @@ from utils.config import config
 class InsightsView(QWidget):
     """Quarter-based insights focused on Results and Earnings Call only."""
 
-    def __init__(self, db: DatabaseManager, alert_service: AlertService, ai_service: AISummaryService):
+    def __init__(
+        self,
+        db: DatabaseManager,
+        alert_service: AlertService,
+        ai_service: AISummaryService,
+        background_jobs: BackgroundJobService = None
+    ):
+        """Init.
+
+        Args:
+            db: Input parameter.
+            alert_service: Input parameter.
+            ai_service: Input parameter.
+            background_jobs: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         super().__init__()
         self.db = db
         self.alert_service = alert_service
         self.ai_service = ai_service
         self.watchman = WatchmanService(db, ai_service)
+        self.background_jobs = background_jobs
         self.current_user_id = None
         self.rows = []
         self.all_rows = []
+        self.user_filings = []
         self.stock_filter_map = {}
         self.quarter_filter_value_map = {}
         self.setup_ui()
 
     def setup_ui(self):
+        """Setup ui.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         layout = QVBoxLayout()
         self.setLayout(layout)
 
@@ -57,7 +85,7 @@ class InsightsView(QWidget):
         header.addWidget(self.quarter_filter)
 
         refresh_btn = QPushButton("Refresh")
-        refresh_btn.clicked.connect(self.load_insights)
+        refresh_btn.clicked.connect(self.refresh_reports_async)
         header.addWidget(refresh_btn)
 
         gen_btn = QPushButton("Generate Missing")
@@ -72,25 +100,41 @@ class InsightsView(QWidget):
         layout.addLayout(header)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
+        self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels([
-            "Quarter", "Insight", "Company", "Updated", "Summary (Brief)", "View"
+            "Quarter", "Insight", "Company", "Updated", "State", "Summary (Brief)", "View"
         ])
         h = self.table.horizontalHeader()
         h.setSectionResizeMode(2, QHeaderView.Stretch)
-        h.setSectionResizeMode(4, QHeaderView.Stretch)
+        h.setSectionResizeMode(5, QHeaderView.Stretch)
         layout.addWidget(self.table)
 
         self.info_label = QLabel()
         layout.addWidget(self.info_label)
 
     def load_for_user(self, user_id: int):
+        """Load for user.
+
+        Args:
+            user_id: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.current_user_id = user_id
         self._load_stock_filter_options(user_id)
         self._load_quarter_filter_options(user_id)
         self.load_insights()
 
     def _load_stock_filter_options(self, user_id: int):
+        """Load stock filter options.
+
+        Args:
+            user_id: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         stocks = self.db.get_user_stocks(user_id)
         self.stock_filter.blockSignals(True)
         self.stock_filter.clear()
@@ -103,7 +147,15 @@ class InsightsView(QWidget):
         self.stock_filter.blockSignals(False)
 
     def _load_quarter_filter_options(self, user_id: int):
-        snapshots = self.db.get_user_insight_snapshots(user_id, limit=1000)
+        """Load quarter filter options.
+
+        Args:
+            user_id: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
+        snapshots = self.db.get_user_global_insight_snapshots(user_id, limit=1000)
         usable_snapshots = []
         for row in snapshots:
             status = (row.get("status") or "").upper()
@@ -129,9 +181,25 @@ class InsightsView(QWidget):
         self.quarter_filter.blockSignals(False)
 
     def _on_filter_change(self):
+        """On filter change.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.load_insights()
 
     def load_insights(self):
+        """Load insights.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.table.setRowCount(0)
         if not self.current_user_id:
             return
@@ -139,7 +207,8 @@ class InsightsView(QWidget):
         if selected_stock_id == "ALL":
             selected_stock_id = None
         selected_quarter = self.quarter_filter_value_map.get(self.quarter_filter.currentText(), "LATEST")
-        snapshots = self.db.get_user_insight_snapshots(self.current_user_id, limit=1000)
+        snapshots = self.db.get_user_global_insight_snapshots(self.current_user_id, limit=1000)
+        self.user_filings = self.db.get_user_filings(self.current_user_id, limit=5000)
         self.all_rows = []
         for row in snapshots:
             if selected_stock_id is not None and row.get("stock_id") != selected_stock_id:
@@ -178,21 +247,34 @@ class InsightsView(QWidget):
             self.table.setItem(i, 1, QTableWidgetItem(insight_label))
             self.table.setItem(i, 2, QTableWidgetItem(row.get("company_name") or row.get("symbol") or "-"))
             self.table.setItem(i, 3, QTableWidgetItem(row.get("updated_at") or row.get("generated_at") or "-"))
+            state = self._insight_state(row)
+            state_item = QTableWidgetItem(state)
+            if state == "New filings available":
+                state_item.setForeground(self.palette().highlight())
+            self.table.setItem(i, 4, state_item)
             text = row.get("summary_text") or "Not available for this quarter."
             brief = text if len(text) <= 220 else f"{text[:217]}..."
             item = QTableWidgetItem(brief)
             item.setToolTip(text)
-            self.table.setItem(i, 4, item)
+            self.table.setItem(i, 5, item)
 
             btn = QPushButton("Open")
             btn.setObjectName("actionBlendBtn")
             btn.clicked.connect(lambda checked, idx=i: self.open_summary_dialog(idx))
-            self.table.setCellWidget(i, 5, btn)
+            self.table.setCellWidget(i, 6, btn)
 
         self.info_label.setText(f"Showing {len(self.rows)} quarter insight snapshot(s).")
 
     @staticmethod
     def _quarter_sort_key(quarter_label: str):
+        """Quarter sort key.
+
+        Args:
+            quarter_label: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if not quarter_label:
             return (0, 0)
         parts = quarter_label.strip().split()
@@ -214,6 +296,14 @@ class InsightsView(QWidget):
         return (fy_num, q_num)
 
     def open_summary_dialog(self, row_idx: int):
+        """Open summary dialog.
+
+        Args:
+            row_idx: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if row_idx < 0 or row_idx >= len(self.rows):
             return
         row = self.rows[row_idx]
@@ -225,28 +315,96 @@ class InsightsView(QWidget):
         )
         dialog.exec_()
 
+    def _insight_state(self, snapshot: dict) -> str:
+        """Detect whether newer filings exist for same stock/quarter/type than snapshot source."""
+        stock_id = snapshot.get("stock_id")
+        source_filing_id = snapshot.get("source_filing_id")
+        quarter_label = snapshot.get("quarter_label")
+        insight_type = snapshot.get("insight_type")
+        if not stock_id or not quarter_label:
+            return "Fresh"
+        target_category = "Results" if insight_type == WatchmanService.INSIGHT_RESULT else "Earnings Call"
+        relevant = []
+        for filing in self.user_filings:
+            if filing.get("stock_id") != stock_id:
+                continue
+            if (filing.get("effective_category") or filing.get("category")) != target_category:
+                continue
+            f_quarter = WatchmanService._quarter_from_filing(filing)
+            if f_quarter != quarter_label:
+                continue
+            relevant.append(filing)
+        if not relevant:
+            return "Fresh"
+        if not source_filing_id:
+            return "New filings available"
+        source_row = next((f for f in relevant if f.get("filing_id") == source_filing_id), None)
+        if not source_row:
+            return "New filings available"
+        source_dt = WatchmanService._parse_date(source_row.get("announcement_date"))
+        latest_dt = max((WatchmanService._parse_date(f.get("announcement_date")) for f in relevant), default=None)
+        if latest_dt and source_dt and latest_dt > source_dt:
+            return "New filings available"
+        return "Fresh"
+
     def generate_missing_summaries(self):
+        """Generate missing summaries.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if not self.current_user_id:
             return
         if not self.ai_service.is_available():
             QMessageBox.information(self, "AI Not Available", "Configure AI provider key first.")
             return
 
-        result = self.watchman.run_for_user(user_id=self.current_user_id, force_regenerate=False)
-        self._load_quarter_filter_options(self.current_user_id)
-        self.load_insights()
+        if not self.background_jobs:
+            QMessageBox.information(self, "Unavailable", "Background service not ready.")
+            return
+        job_id = self.background_jobs.enqueue_insight_job(self.current_user_id, force_regenerate=False)
         QMessageBox.information(
             self,
-            "Insights",
+            "Queued",
             (
-                f"Generated: {result['generated']}\n"
-                f"Skipped existing: {result['skipped_existing']}\n"
-                f"Not available: {result['not_available']}\n"
-                f"Failed: {result['failed']}"
+                f"Insight generation request queued (Job #{job_id}).\n"
+                "We will alert you once the reports are ready."
+            )
+        )
+
+    def refresh_reports_async(self):
+        """Queue a non-blocking refresh of missing insights and reload current grid."""
+        self.load_insights()
+        if not self.current_user_id:
+            return
+        if not self.ai_service.is_available():
+            QMessageBox.information(self, "AI Not Available", "Configure AI provider key first.")
+            return
+        if not self.background_jobs:
+            QMessageBox.information(self, "Unavailable", "Background service not ready.")
+            return
+        job_id = self.background_jobs.enqueue_insight_job(self.current_user_id, force_regenerate=False)
+        QMessageBox.information(
+            self,
+            "Queued",
+            (
+                f"Refresh queued (Job #{job_id}).\n"
+                "We will alert you once the reports are ready."
             )
         )
 
     def regenerate_summaries_admin(self):
+        """Regenerate summaries admin.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         if not self.current_user_id:
             return
         if not config.ENABLE_ADMIN_REGENERATE:
@@ -265,15 +423,15 @@ class InsightsView(QWidget):
         if reply != QMessageBox.Yes:
             return
 
-        result = self.watchman.run_for_user(user_id=self.current_user_id, force_regenerate=True)
-        self._load_quarter_filter_options(self.current_user_id)
-        self.load_insights()
+        if not self.background_jobs:
+            QMessageBox.information(self, "Unavailable", "Background service not ready.")
+            return
+        job_id = self.background_jobs.enqueue_insight_job(self.current_user_id, force_regenerate=True)
         QMessageBox.information(
             self,
-            "Admin Regenerate",
+            "Queued",
             (
-                f"Generated: {result['generated']}\n"
-                f"Not available: {result['not_available']}\n"
-                f"Failed: {result['failed']}"
+                f"Admin regenerate queued (Job #{job_id}).\n"
+                "We will alert you once the reports are ready."
             )
         )

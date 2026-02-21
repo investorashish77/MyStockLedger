@@ -23,6 +23,7 @@ from services.bse_feed_service import BSEFeedService
 from services.bse_bhavcopy_service import BSEBhavcopyService
 from services.nsetools_adapter import NSEToolsAdapter
 from services.watchman_service import WatchmanService
+from utils.config import config
 
 
 class TestAuthService(unittest.TestCase):
@@ -320,6 +321,50 @@ class TestDatabaseManager(unittest.TestCase):
         self.db.set_setting("filings_api_last_sync_date", "20260215")
         self.assertEqual(self.db.get_setting("filings_api_last_sync_date"), "20260215")
 
+    def test_background_job_enqueue_claim_complete(self):
+        """Test background job enqueue claim complete.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
+        user_id = self.db.create_user("9000000003", "Job User", "hash")
+        job_id = self.db.enqueue_background_job(
+            job_type="GENERATE_MISSING_INSIGHTS",
+            requested_by=user_id,
+            payload={"user_id": user_id, "force_regenerate": False}
+        )
+        self.assertGreater(job_id, 0)
+
+        claimed = self.db.claim_next_background_job()
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed["job_id"], job_id)
+        self.assertEqual(claimed["status"], "RUNNING")
+        self.assertEqual(claimed["payload"]["user_id"], user_id)
+
+        self.db.complete_background_job(job_id, status="SUCCESS", result={"generated": 2})
+        self.assertIsNone(self.db.claim_next_background_job())
+
+    def test_notifications_unread_count_and_mark_read(self):
+        """Test notifications unread count and mark read.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
+        user_id = self.db.create_user("9000000004", "Notify User", "hash")
+        self.db.add_notification(user_id, "INSIGHTS_READY", "Insights Ready", "Done", {"job_id": 1})
+        self.db.add_notification(None, "SYSTEM", "Global", "Hello", {})
+        self.assertEqual(self.db.get_unread_notifications_count(user_id), 2)
+        rows = self.db.get_user_notifications(user_id, unread_only=True, limit=10)
+        self.assertEqual(len(rows), 2)
+        self.db.mark_all_notifications_read(user_id)
+        self.assertEqual(self.db.get_unread_notifications_count(user_id), 0)
+
     def test_get_user_stocks_with_symbol_master_matches_ns_suffix(self):
         """Stock rows with .NS should map to symbol_master base symbol."""
         user_id = self.db.create_user("9000000001", "Suffix User", "hash")
@@ -338,6 +383,14 @@ class TestDatabaseManager(unittest.TestCase):
         self.assertEqual(rows[0]["bse_code"], "543270")
 
     def test_bse_daily_price_upsert_and_portfolio_series(self):
+        """Test bse daily price upsert and portfolio series.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         user_id = self.db.create_user("9000000002", "Bhavcopy User", "hash")
         stock_id = self.db.add_stock(user_id, "GOODLUCK", "Goodluck India Limited", "NSE")
         self.db.upsert_symbol_master(
@@ -367,6 +420,14 @@ class TestDatabaseManager(unittest.TestCase):
         self.assertEqual(series[2]["portfolio_value"], 600.0)
 
     def test_analyst_consensus_upsert_and_get(self):
+        """Test analyst consensus upsert and get.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         user_id = self.db.create_user("9000011111", "Analyst User", "hash")
         stock_id = self.db.add_stock(user_id, "INFY", "Infosys Ltd", "NSE")
         consensus_id = self.db.upsert_analyst_consensus(
@@ -508,6 +569,14 @@ class TestAlertService(unittest.TestCase):
 
     @patch("services.bse_feed_service.BSEFeedService.ingest_api_range")
     def test_sync_bse_feed_for_portfolio_uses_bse_codes(self, mock_ingest):
+        """Test sync bse feed for portfolio uses bse codes.
+
+        Args:
+            mock_ingest: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         user_id = self.db.create_user("9999999998", "BSE Sync", "hash")
         self.db.add_stock(user_id, "GOODLUCK", "Goodluck India Limited", "NSE")
         self.db.upsert_symbol_master(
@@ -533,16 +602,40 @@ class TestAlertService(unittest.TestCase):
         self.assertEqual(kwargs["scrip_code"], "530655")
 
     def test_classify_category_earnings_call_not_results(self):
+        """Test classify category earnings call not results.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         headline = "Transcript of Earnings Conference Call for Q3 FY26"
         category = self.alert_service._classify_category(headline)
         self.assertEqual(category, "Earnings Call")
 
     def test_classify_category_results_strong_term(self):
+        """Test classify category results strong term.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         headline = "Unaudited Financial Results for quarter ended December 31, 2025"
         category = self.alert_service._classify_category(headline)
         self.assertEqual(category, "Results")
 
     def test_sync_portfolio_filings_uses_targeted_announcements_not_global_recent_slice(self):
+        """Test sync portfolio filings uses targeted announcements not global recent slice.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         user_id = self.db.create_user("9999999997", "Targeted Filings", "hash")
         stock_id = self.db.add_stock(user_id, "GOODLUCK", "Goodluck India Limited", "NSE")
         symbol_id = self.db.upsert_symbol_master(
@@ -638,10 +731,71 @@ class TestAISummaryService(unittest.TestCase):
         self.assertIn("Special hint:", hint)
 
     def test_prompt_branching_results_vs_non_results(self):
+        """Test prompt branching results vs non results.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         results_prompt = self.ai_service._create_prompt("ABC", "Unaudited financial results text", "Results")
         non_results_prompt = self.ai_service._create_prompt("ABC", "Investor call transcript text", "Earnings Call")
         self.assertIn("Result Summary", results_prompt)
         self.assertIn("Summary:", non_results_prompt)
+
+    def test_generate_summary_uses_cache_when_db_available(self):
+        """Test generate summary uses cache when db available.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
+        db = DatabaseManager(":memory:")
+        ai = AISummaryService(db_manager=db)
+        ai.provider = "groq"
+        ai.client = object()
+        ai._generate_groq_summary = MagicMock(return_value={
+            "summary_text": "Summary:\n- Cached response",
+            "sentiment": "NEUTRAL",
+            "provider": "groq",
+        })
+
+        first = ai.generate_summary("ABC", "Some filing text", "ANNOUNCEMENT", document_url=None)
+        second = ai.generate_summary("ABC", "Some filing text", "ANNOUNCEMENT", document_url=None)
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertEqual(ai._generate_groq_summary.call_count, 1)
+        self.assertTrue(second.get("cache_hit"))
+
+    def test_generate_analyst_consensus_uses_analyst_provider_override(self):
+        """Test generate analyst consensus uses analyst provider override.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
+        db = DatabaseManager(":memory:")
+        ai = AISummaryService(db_manager=db)
+        ai.provider = "ollama"
+        ai.client = True
+        with patch.object(config, "ANALYST_AI_PROVIDER", "groq"), patch.object(
+            ai, "_generate_with_cache_for_provider"
+        ) as gen_override:
+            gen_override.return_value = {
+                "summary_text": "Analyst consensus",
+                "sentiment": "NEUTRAL",
+                "provider": "groq",
+            }
+            result = ai.generate_analyst_consensus("ABC Ltd", "ABC")
+        self.assertIsNotNone(result)
+        kwargs = gen_override.call_args.kwargs
+        self.assertEqual(kwargs.get("provider"), "groq")
 
     @patch("services.ai_summary_service.PdfReader")
     @patch("services.ai_summary_service.requests.get")
@@ -664,6 +818,15 @@ class TestAISummaryService(unittest.TestCase):
     @patch("services.ai_summary_service.PdfReader")
     @patch("services.ai_summary_service.requests.get")
     def test_extract_pdf_text_falls_back_to_secondary_link(self, mock_get, mock_pdf_reader):
+        """Test extract pdf text falls back to secondary link.
+
+        Args:
+            mock_get: Input parameter.
+            mock_pdf_reader: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         page = MagicMock()
         page.extract_text.return_value = "PAT 120 | EPS 4.2"
         reader_instance = MagicMock()
@@ -681,17 +844,69 @@ class TestAISummaryService(unittest.TestCase):
         self.assertIn("PAT 120", text)
         self.assertGreaterEqual(mock_get.call_count, 2)
 
+    @patch("services.ai_summary_service.requests.post")
+    def test_ollama_model_fallback_uses_secondary_model(self, mock_post):
+        """Test ollama model fallback uses secondary model.
+
+        Args:
+            mock_post: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
+        ai = AISummaryService()
+        ai.provider = "ollama"
+        ai.client = True
+
+        first_fail = MagicMock()
+        first_fail.raise_for_status.side_effect = Exception("model load failed")
+
+        second_ok = MagicMock()
+        second_ok.raise_for_status.return_value = None
+        second_ok.json.return_value = {"message": {"content": "Summary:\n- Fallback worked"}}
+        mock_post.side_effect = [first_fail, second_ok]
+
+        with patch.object(config, "OLLAMA_MODEL", "qwen2.5:14b"), patch.object(
+            config, "OLLAMA_FALLBACK_MODELS", ["gemma3:4b"]
+        ), patch.object(config, "OLLAMA_TIMEOUT_PRIMARY_SEC", 150), patch.object(
+            config, "OLLAMA_TIMEOUT_FALLBACK_SEC", 45
+        ):
+            result = ai._generate_ollama_summary("test prompt", max_tokens=120)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.get("provider"), "ollama")
+        self.assertEqual(result.get("model"), "gemma3:4b")
+        self.assertEqual(mock_post.call_count, 2)
+        self.assertEqual(mock_post.call_args_list[0].kwargs.get("timeout"), 150)
+        self.assertEqual(mock_post.call_args_list[1].kwargs.get("timeout"), 45)
+
 
 class TestResearchDataLayer(unittest.TestCase):
     """Test symbol master, financial schema operations, and BSE feed ingestion."""
 
     def setUp(self):
+        """Setup.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.db = DatabaseManager(':memory:')
         self.symbol_service = SymbolMasterService(self.db)
         self.bse_service = BSEFeedService(self.db)
         self.bhav_service = BSEBhavcopyService(self.db)
 
     def test_symbol_master_population_and_search(self):
+        """Test symbol master population and search.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         rows = [
             {"symbol": "RELIANCE", "company_name": "Reliance Industries Ltd", "exchange": "NSE", "bse_code": "500325"},
             {"symbol": "TCS", "company_name": "Tata Consultancy Services Ltd", "exchange": "NSE", "bse_code": "532540"},
@@ -704,8 +919,24 @@ class TestResearchDataLayer(unittest.TestCase):
         self.assertEqual(matches[0]["symbol"], "RELIANCE")
 
     def test_symbol_master_population_from_nsetools_adapter(self):
+        """Test symbol master population from nsetools adapter.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         class FakeNSEAdapter:
             def fetch_symbol_rows(self):
+                """Fetch symbol rows.
+
+                Args:
+                    None.
+
+                Returns:
+                    Any: Method output for caller use.
+                """
                 return [
                     {"symbol": "INFY", "company_name": "Infosys Ltd", "exchange": "NSE"},
                     {"symbol": "HDFCBANK", "company_name": "HDFC Bank Ltd", "exchange": "NSE"},
@@ -719,6 +950,14 @@ class TestResearchDataLayer(unittest.TestCase):
         self.assertEqual(infy["exchange"], "NSE")
 
     def test_symbol_master_population_from_bse_csv_headers(self):
+        """Test symbol master population from bse csv headers.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         csv_text = """Security Code,Issuer Name,Security Id,Security Name,Status,Group,Face Value,ISIN No,Instrument
 500325,Reliance Industries Limited,RELIANCE,Reliance Industries Ltd,Active,A,10,INE002A01018,Equity
 532540,Tata Consultancy Services Limited,TCS,Tata Consultancy Services Ltd,Active,A,1,INE467B01029,Equity
@@ -732,6 +971,14 @@ class TestResearchDataLayer(unittest.TestCase):
         self.assertEqual(reliance["nse_code"], "RELIANCE")
 
     def test_quarterly_financials_and_ratios_upsert(self):
+        """Test quarterly financials and ratios upsert.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         symbol_id = self.db.upsert_symbol_master(
             symbol="AAPL",
             company_name="Apple Inc",
@@ -777,6 +1024,14 @@ class TestResearchDataLayer(unittest.TestCase):
 
     @patch("services.bse_feed_service.requests.get")
     def test_bse_rss_ingestion(self, mock_get):
+        """Test bse rss ingestion.
+
+        Args:
+            mock_get: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         rss_xml = """<?xml version="1.0" encoding="UTF-8"?>
 <rss><channel>
   <item>
@@ -824,6 +1079,14 @@ class TestResearchDataLayer(unittest.TestCase):
         self.assertEqual(rows[0]["headline"], "Updated headline")
 
     def test_bse_bhavcopy_ingest_rows_camel_case(self):
+        """Test bse bhavcopy ingest rows camel case.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         rows = [
             {
                 "scripCode": "530655",
@@ -845,6 +1108,14 @@ class TestResearchDataLayer(unittest.TestCase):
 
     @patch("services.bse_bhavcopy_service.requests.get")
     def test_bse_bhavcopy_fetch_and_ingest_direct_csv(self, mock_get):
+        """Test bse bhavcopy fetch and ingest direct csv.
+
+        Args:
+            mock_get: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         csv_text = (
             "FinInstrmId,TradDt,OpnPric,HghPric,LwPric,ClsPric,TtlTradgVol,TtlNbTrad,TtlTrfVal\n"
             "530655,20260214,100,110,95,108,123456,789,1234567\n"
@@ -876,6 +1147,14 @@ class TestResearchDataLayer(unittest.TestCase):
 
     @patch("services.bse_feed_service.requests.get")
     def test_bse_api_ingestion_uses_expected_params_and_pagination(self, mock_get):
+        """Test bse api ingestion uses expected params and pagination.
+
+        Args:
+            mock_get: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         page_1 = MagicMock()
         page_1.status_code = 200
         page_1.raise_for_status.return_value = None
@@ -931,8 +1210,23 @@ class TestResearchDataLayer(unittest.TestCase):
 
 class TestWatchmanService(unittest.TestCase):
     def setUp(self):
+        """Setup.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.db = DatabaseManager(":memory:")
         self.user_id = self.db.create_user("9111111111", "Watchman User", "hash")
+        self.symbol_id = self.db.upsert_symbol_master(
+            symbol="GOODLUCK",
+            company_name="Goodluck India Limited",
+            exchange="NSE",
+            nse_code="GOODLUCK",
+            source="TEST",
+        )
         self.stock_id = self.db.add_stock(self.user_id, "GOODLUCK", "Goodluck India Limited", "NSE")
         self.ai = MagicMock()
         self.ai.provider = "test"
@@ -944,6 +1238,17 @@ class TestWatchmanService(unittest.TestCase):
         self.watchman = WatchmanService(self.db, self.ai)
 
     def _seed_filing(self, category: str, headline: str, dt: str, ref: str):
+        """Seed filing.
+
+        Args:
+            category: Input parameter.
+            headline: Input parameter.
+            dt: Input parameter.
+            ref: Input parameter.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self.db.upsert_filing(
             stock_id=self.stock_id,
             symbol_id=None,
@@ -957,18 +1262,34 @@ class TestWatchmanService(unittest.TestCase):
         )
 
     def test_generates_two_snapshots_for_latest_quarter(self):
+        """Test generates two snapshots for latest quarter.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self._seed_filing("Results", "Q3 FY26 financial results", "2026-02-14", "res-q3")
         self._seed_filing("Earnings Call", "Q3 FY26 conference call transcript", "2026-02-16", "cc-q3")
         result = self.watchman.run_for_user(self.user_id, force_regenerate=False)
         self.assertEqual(result["generated"], 2)
 
-        snapshots = self.db.get_user_insight_snapshots(self.user_id)
+        snapshots = self.db.get_user_global_insight_snapshots(self.user_id)
         types = {s["insight_type"] for s in snapshots}
         self.assertIn(WatchmanService.INSIGHT_RESULT, types)
         self.assertIn(WatchmanService.INSIGHT_CONCALL, types)
         self.assertTrue(all(s["quarter_label"] == "Q3 FY26" for s in snapshots))
 
     def test_no_regeneration_when_snapshot_exists(self):
+        """Test no regeneration when snapshot exists.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self._seed_filing("Results", "Q3 FY26 financial results", "2026-02-14", "res-q3")
         self._seed_filing("Earnings Call", "Q3 FY26 conference call transcript", "2026-02-16", "cc-q3")
         first = self.watchman.run_for_user(self.user_id, force_regenerate=False)
@@ -977,6 +1298,14 @@ class TestWatchmanService(unittest.TestCase):
         self.assertGreaterEqual(second["skipped_existing"], 2)
 
     def test_daily_run_runs_once(self):
+        """Test daily run runs once.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self._seed_filing("Results", "Q3 FY26 financial results", "2026-02-14", "res-q3")
         self._seed_filing("Earnings Call", "Q3 FY26 conference call transcript", "2026-02-16", "cc-q3")
         first = self.watchman.run_daily_if_due(self.user_id)
@@ -985,26 +1314,50 @@ class TestWatchmanService(unittest.TestCase):
         self.assertIsNone(second)
 
     def test_result_prefers_financial_result_over_call_notice(self):
+        """Test result prefers financial result over call notice.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self._seed_filing("Results", "Board meeting notice for conference call", "2026-02-12", "res-notice")
         self._seed_filing("Results", "Q3 FY26 financial results standalone and consolidated", "2026-02-14", "res-final")
         result = self.watchman.run_for_user(self.user_id, force_regenerate=False)
         self.assertEqual(result["generated"], 1)
 
-        snapshot = self.db.get_insight_snapshot(self.stock_id, "Q3 FY26", WatchmanService.INSIGHT_RESULT)
+        snapshot = self.db.get_global_insight_snapshot(self.symbol_id, "Q3 FY26", WatchmanService.INSIGHT_RESULT)
         self.assertIsNotNone(snapshot)
         self.assertEqual(snapshot["source_ref"], "res-final")
 
     def test_concall_skips_generic_notice_without_transcript_or_recording(self):
+        """Test concall skips generic notice without transcript or recording.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self._seed_filing("Earnings Call", "Investor call notice for Q3 FY26", "2026-02-15", "cc-notice")
         result = self.watchman.run_for_user(self.user_id, force_regenerate=False)
         self.assertEqual(result["generated"], 0)
         self.assertEqual(result["not_available"], 2)
 
-        snapshot = self.db.get_insight_snapshot(self.stock_id, "Q3 FY26", WatchmanService.INSIGHT_CONCALL)
+        snapshot = self.db.get_global_insight_snapshot(self.symbol_id, "Q3 FY26", WatchmanService.INSIGHT_CONCALL)
         self.assertIsNotNone(snapshot)
         self.assertEqual(snapshot["status"], "NOT_AVAILABLE")
 
     def test_results_retries_next_candidate_when_first_summary_is_all_na(self):
+        """Test results retries next candidate when first summary is all na.
+
+        Args:
+            None.
+
+        Returns:
+            Any: Method output for caller use.
+        """
         self._seed_filing("Results", "Q3 FY26 financial results - short update", "2026-02-14", "res-short")
         self._seed_filing("Results", "Q3 FY26 investor presentation with detailed financials", "2026-02-15", "res-ppt")
         self._seed_filing("Earnings Call", "Q3 FY26 conference call transcript", "2026-02-16", "cc-q3")
@@ -1041,10 +1394,49 @@ class TestWatchmanService(unittest.TestCase):
         result = self.watchman.run_for_user(self.user_id, force_regenerate=False)
         self.assertEqual(result["generated"], 2)
 
-        snapshot = self.db.get_insight_snapshot(self.stock_id, "Q3 FY26", WatchmanService.INSIGHT_RESULT)
+        snapshot = self.db.get_global_insight_snapshot(self.symbol_id, "Q3 FY26", WatchmanService.INSIGHT_RESULT)
         self.assertIsNotNone(snapshot)
         self.assertEqual(snapshot["source_ref"], "res-ppt")
         self.assertIn("Revenue: 100", snapshot["summary_text"])
+
+    def test_daily_material_scan_creates_short_material_alert(self):
+        self.db.add_bse_announcement(
+            symbol_id=self.symbol_id,
+            scrip_code="530655",
+            headline="GOODLUCK receives new export order for steel structures worth Rs 180 crore",
+            category="Announcement",
+            announcement_date="2026-02-20",
+            attachment_url="https://example.com/material.pdf",
+            exchange_ref_id="mat-1",
+            rss_guid="mat-1",
+        )
+        result = self.watchman.run_daily_material_scan(self.user_id, daily_only=True)
+        self.assertEqual(result["alerts_created"], 1)
+
+        notifs = self.db.get_user_notifications(self.user_id, unread_only=False, limit=10)
+        material = next((n for n in notifs if n["notif_type"] == "MATERIAL_ALERT"), None)
+        self.assertIsNotNone(material)
+        self.assertIn("Company: Goodluck India Limited", material["message"])
+        summary_line = next((line for line in material["message"].splitlines() if line.startswith("🧾Summary:")), "")
+        self.assertTrue(summary_line)
+        summary_words = summary_line.replace("🧾Summary:", "").strip().replace("...", "").split()
+        self.assertLessEqual(len(summary_words), 20)
+
+    def test_daily_material_scan_runs_once_per_day(self):
+        self.db.add_bse_announcement(
+            symbol_id=self.symbol_id,
+            scrip_code="530655",
+            headline="GOODLUCK announces joint venture agreement with global partner",
+            category="Announcement",
+            announcement_date="2026-02-20",
+            attachment_url="https://example.com/jv.pdf",
+            exchange_ref_id="mat-2",
+            rss_guid="mat-2",
+        )
+        first = self.watchman.run_daily_material_scan(self.user_id, daily_only=True)
+        second = self.watchman.run_daily_material_scan(self.user_id, daily_only=True)
+        self.assertEqual(first["skipped_daily"], 0)
+        self.assertEqual(second["skipped_daily"], 1)
 
 
 def run_tests():
