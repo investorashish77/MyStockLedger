@@ -39,5 +39,9 @@ A desktop application for tracking equity investments with AI-powered analysis.
 - AI code review loop: `DesignDocuments/AI_CODE_REVIEW_LOOP.md`
 - Local review script: `python scripts/ai_code_review.py --base main`
 
+## Prompt Tuning
+- Editable AI prompts file: `prompts/ai_prompt_templates.md`
+- Configure path via `.env`: `AI_PROMPT_FILE=prompts/ai_prompt_templates.md`
+
 ## License
 Personal use only (for now)

@@ -42,6 +42,7 @@ class Config:
         self.OLLAMA_TIMEOUT_PRIMARY_SEC = int(os.getenv('OLLAMA_TIMEOUT_PRIMARY_SEC', '120'))
         self.OLLAMA_TIMEOUT_FALLBACK_SEC = int(os.getenv('OLLAMA_TIMEOUT_FALLBACK_SEC', '60'))
         self.AI_CACHE_ENABLED = os.getenv('AI_CACHE_ENABLED', 'true').lower() == 'true'
+        self.AI_PROMPT_FILE = os.getenv('AI_PROMPT_FILE', 'prompts/ai_prompt_templates.md').strip()
         
         # Alert settings
         self.ALERT_CHECK_INTERVAL = int(os.getenv('ALERT_CHECK_INTERVAL', '3600'))

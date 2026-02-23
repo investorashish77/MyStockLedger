@@ -7,6 +7,7 @@ import unittest
 import sys
 import os
 import tempfile
+from pathlib import Path
 from datetime import datetime
 from unittest.mock import patch, MagicMock
 
@@ -23,6 +24,7 @@ from services.bse_feed_service import BSEFeedService
 from services.bse_bhavcopy_service import BSEBhavcopyService
 from services.nsetools_adapter import NSEToolsAdapter
 from services.watchman_service import WatchmanService
+from services.financial_result_parser import FinancialResultParser
 from utils.config import config
 
 
@@ -730,6 +732,69 @@ class TestAISummaryService(unittest.TestCase):
         self.assertIn("EPS:", hint)
         self.assertIn("Special hint:", hint)
 
+    def test_financial_result_parser_extracts_key_metrics(self):
+        """Parser should extract metric lines with hints from text blob."""
+        text = (
+            "Revenue from operations stood at INR 712 crore, up 12.4% YoY and 3.1% QoQ. "
+            "EBITDA at INR 46.1 crore, margin improved. "
+            "Profit after tax (PAT) at INR 29.6 crore, up 8.5% YoY. "
+            "EPS at Rs 5.2 for the quarter. Exceptional item: tax credit reversal."
+        )
+        parsed = FinancialResultParser.parse_from_text(text)
+        self.assertEqual(parsed["Revenue"]["value"].lower().startswith("inr 712"), True)
+        self.assertIn("Cr", parsed["Revenue"]["value_crore"])
+        self.assertIn("yoy", parsed["Revenue"]["yoy"].lower())
+        self.assertIn("qoq", parsed["Revenue"]["qoq"].lower())
+        self.assertNotEqual(parsed["PAT"]["value"], "NA")
+        self.assertNotEqual(parsed["EPS"]["value"], "NA")
+        self.assertIn("special", FinancialResultParser.to_prompt_hint(parsed).lower())
+
+    def test_financial_result_parser_normalizes_lakh_and_negative_brackets(self):
+        """Lakhs should normalize to crores and bracket values should become negative."""
+        text = (
+            "Statement of unaudited results (Rs in Lakhs). "
+            "Revenue from operations 12,500. EBITDA (590). "
+            "Profit after tax (PAT) (310). EPS (2.4). Exceptional items (250)."
+        )
+        parsed = FinancialResultParser.parse_from_text(text)
+        self.assertEqual(parsed["Revenue"]["value_crore"], "125.00 Cr")
+        self.assertTrue(parsed["EBITDA"]["value"].startswith("(590"))
+        self.assertEqual(parsed["EBITDA"]["value_crore"], "-5.90 Cr")
+        self.assertEqual(parsed["PAT"]["value_crore"], "-3.10 Cr")
+        self.assertIn("Validation:", FinancialResultParser.to_prompt_hint(parsed))
+
+    def test_financial_result_parser_table_column_resolution_and_calc(self):
+        """Should pick latest quarter column and compute YoY/QoQ from table values."""
+        table = [
+            ["Particulars", "Q3 FY26 Unaudited", "Q2 FY26 Unaudited", "Q3 FY25 Unaudited"],
+            ["Revenue from operations", "712.0", "650.0", "635.0"],
+            ["EBITDA", "46.1", "40.0", "38.2"],
+            ["Profit after tax", "29.6", "24.0", "22.5"],
+            ["Earnings per share", "5.2", "4.1", "3.9"],
+            ["Exceptional items", "12.0", "0.0", "0.0"],
+        ]
+        parsed = FinancialResultParser._parse_from_table_rows(table)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["Quarter Label"], "Q3 FY26")
+        self.assertEqual(parsed["Revenue"]["value"], "712.0")
+        self.assertIn("QoQ", parsed["Revenue"]["qoq"])
+        self.assertIn("YoY", parsed["Revenue"]["yoy"])
+        hint = FinancialResultParser.to_prompt_hint(parsed)
+        self.assertIn("Detected Quarter: Q3 FY26", hint)
+        self.assertIn("Validation:", hint)
+
+    def test_results_prompt_uses_structured_parser_hints(self):
+        """Results prompt should include parser-derived structured hints."""
+        text = (
+            "Total income INR 500 crore; 10% YoY and 2% QoQ. "
+            "EBITDA INR 80 crore. PAT INR 45 crore. EPS Rs 4.5."
+        )
+        prompt = self.ai_service._create_results_prompt("ABC", text, "Results")
+        self.assertIn("Revenue:", prompt)
+        self.assertIn("EBITDA:", prompt)
+        self.assertIn("PAT:", prompt)
+        self.assertIn("EPS:", prompt)
+
     def test_prompt_branching_results_vs_non_results(self):
         """Test prompt branching results vs non results.
 
@@ -879,6 +944,73 @@ class TestAISummaryService(unittest.TestCase):
         self.assertEqual(mock_post.call_count, 2)
         self.assertEqual(mock_post.call_args_list[0].kwargs.get("timeout"), 150)
         self.assertEqual(mock_post.call_args_list[1].kwargs.get("timeout"), 45)
+
+    def test_prompt_file_missing_uses_builtin_fallback(self):
+        """Missing prompt file should not break prompt creation."""
+        ai = AISummaryService()
+        ai._prompt_file_path = Path("/tmp/non_existent_prompt_file.md")
+        ai._load_prompt_config()
+        prompt = ai._create_prompt("ABC", "Result text", "Results")
+        self.assertIn("Result Summary", prompt)
+        self.assertIn("ABC", prompt)
+
+    def test_prompt_file_custom_template_is_loaded_and_rendered(self):
+        """Custom prompt file should render governance + template placeholders."""
+        content = """# System Prompt
+Always be precise.
+
+# Tool Usage Policy
+Only use provided content.
+
+## Results
+```prompt
+Custom Results for {stock_symbol}
+Type: {announcement_type}
+Body: {announcement_text}
+Hint: {quick_metrics_hint}
+```
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
+        try:
+            ai = AISummaryService()
+            ai._prompt_file_path = tmp_path
+            ai._load_prompt_config()
+            prompt = ai._create_prompt("XYZ", "Quarterly filing body", "Results")
+            self.assertIn("System Prompt:", prompt)
+            self.assertIn("Always be precise.", prompt)
+            self.assertIn("Custom Results for XYZ", prompt)
+            self.assertIn("Type: Results", prompt)
+        finally:
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+    def test_prompt_file_malformed_template_falls_back(self):
+        """Malformed template block should fall back to built-in prompt text."""
+        bad_content = """# System Prompt
+Be strict.
+
+## Results
+No fenced prompt block here
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as tmp:
+            tmp.write(bad_content)
+            tmp_path = Path(tmp.name)
+        try:
+            ai = AISummaryService()
+            ai._prompt_file_path = tmp_path
+            ai._load_prompt_config()
+            prompt = ai._create_prompt("ABC", "Some results text", "Results")
+            self.assertIn("Result Summary", prompt)
+            self.assertNotIn("No fenced prompt block here", prompt)
+        finally:
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
 
 
 class TestResearchDataLayer(unittest.TestCase):

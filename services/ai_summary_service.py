@@ -8,10 +8,12 @@ import re
 import hashlib
 from datetime import date
 from io import BytesIO
+from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 import requests
+from services.financial_result_parser import FinancialResultParser
 from utils.config import config
 from utils.logger import get_logger
 
@@ -27,6 +29,19 @@ class AISummaryService:
         "your_groq_api_key_here",
         "your_claude_api_key_here",
         "your_openai_api_key_here",
+    }
+    PROMPT_SECTION_KEYS = {
+        "system": "System Prompt",
+        "tool_policy": "Tool Usage Policy",
+        "behavior": "Behavior",
+        "response_format": "Response Format",
+        "tables": "Tables",
+    }
+    PROMPT_TEMPLATE_KEYS = {
+        "results": "Results",
+        "earnings_call": "Earnings Call",
+        "non_results": "Non Results",
+        "analyst_consensus": "Analyst Consensus",
     }
     
     def __init__(self, db_manager=None):
@@ -44,6 +59,11 @@ class AISummaryService:
         self.client = None
         self.groq_client = None
         self.last_error = None
+        self._prompt_file_path = Path(config.AI_PROMPT_FILE).resolve()
+        self._prompt_file_mtime = None
+        self._prompt_sections: Dict[str, str] = {}
+        self._prompt_templates: Dict[str, str] = {}
+        self._load_prompt_config()
 
         groq_key = self._normalize_api_key(config.GROQ_API_KEY)
         claude_key = self._normalize_api_key(config.CLAUDE_API_KEY)
@@ -95,6 +115,95 @@ class AISummaryService:
             return self.groq_client
         except Exception:
             return None
+
+    class _SafeDict(dict):
+        """dict subclass returning empty string for missing format keys."""
+
+        def __missing__(self, key):
+            return ""
+
+    def _load_prompt_config(self):
+        """Load prompt sections/templates from markdown config file."""
+        path = self._prompt_file_path
+        if not path.exists():
+            self.logger.warning("Prompt file not found: %s. Falling back to built-in defaults.", path)
+            self._prompt_sections = {}
+            self._prompt_templates = {}
+            return
+        try:
+            content = path.read_text(encoding="utf-8")
+        except Exception as exc:
+            self.logger.warning("Failed reading prompt file %s: %s", path, exc)
+            self._prompt_sections = {}
+            self._prompt_templates = {}
+            return
+
+        self._prompt_file_mtime = path.stat().st_mtime
+        self._prompt_sections = self._parse_prompt_sections(content)
+        self._prompt_templates = self._parse_prompt_templates(content)
+
+    def _reload_prompt_config_if_changed(self):
+        """Reload prompt file if modified on disk."""
+        path = self._prompt_file_path
+        try:
+            if not path.exists():
+                return
+            current_mtime = path.stat().st_mtime
+            if self._prompt_file_mtime is None or current_mtime > (self._prompt_file_mtime or 0):
+                self._load_prompt_config()
+        except Exception:
+            return
+
+    @staticmethod
+    def _parse_prompt_sections(content: str) -> Dict[str, str]:
+        """Parse top-level sections like '# System Prompt' from markdown content."""
+        sections: Dict[str, str] = {}
+        matches = list(re.finditer(r"^#\s+(.+?)\s*$", content, flags=re.MULTILINE))
+        for idx, match in enumerate(matches):
+            name = match.group(1).strip()
+            start = match.end()
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(content)
+            body = content[start:end].strip()
+            sections[name] = body
+        return sections
+
+    @staticmethod
+    def _parse_prompt_templates(content: str) -> Dict[str, str]:
+        """Parse template blocks under '## <Template Name>' fenced by ```prompt."""
+        templates: Dict[str, str] = {}
+        pattern = re.compile(
+            r"^##\s+(.+?)\s*$\n+```prompt\n(.*?)\n```",
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        for match in pattern.finditer(content):
+            template_name = match.group(1).strip()
+            template_body = match.group(2).strip()
+            templates[template_name] = template_body
+        return templates
+
+    def _compose_governance_prefix(self) -> str:
+        """Compose shared prompt governance sections."""
+        self._reload_prompt_config_if_changed()
+        parts = []
+        for key in ("system", "tool_policy", "behavior", "response_format", "tables"):
+            section_name = self.PROMPT_SECTION_KEYS[key]
+            section_body = (self._prompt_sections.get(section_name) or "").strip()
+            if section_body:
+                parts.append(f"{section_name}:\n{section_body}")
+        return "\n\n".join(parts).strip()
+
+    def _render_template(self, template_key: str, context: Dict[str, str], fallback: str) -> str:
+        """Render configured template with context, or return fallback."""
+        self._reload_prompt_config_if_changed()
+        template_name = self.PROMPT_TEMPLATE_KEYS[template_key]
+        template = (self._prompt_templates.get(template_name) or "").strip()
+        if not template:
+            return fallback
+        rendered = template.format_map(self._SafeDict(context))
+        governance = self._compose_governance_prefix()
+        if governance:
+            return f"{governance}\n\n{rendered}".strip()
+        return rendered.strip()
     
     def is_available(self) -> bool:
         """Check if AI service is available"""
@@ -245,12 +354,20 @@ class AISummaryService:
             return None
         
         document_text = ""
+        parsed_result_hint = ""
         if document_url:
+            if (announcement_type or "").strip().lower() == "results":
+                pdf_bytes = self._download_pdf_bytes(document_url)
+                if pdf_bytes:
+                    parsed = FinancialResultParser.parse_from_pdf_bytes(pdf_bytes)
+                    parsed_result_hint = FinancialResultParser.to_prompt_hint(parsed)
             document_text = self._extract_pdf_text_from_url(document_url)
 
         combined_text = announcement_text or ""
         if document_text:
             combined_text = f"{combined_text}\n\n[Extracted PDF Text]\n{document_text}".strip()
+        if parsed_result_hint:
+            combined_text = f"{combined_text}\n\n[Parsed Result Metrics]\n{parsed_result_hint}".strip()
 
         # Create prompt
         prompt = self._create_prompt(stock_symbol, combined_text, announcement_type)
@@ -277,7 +394,7 @@ class AISummaryService:
         as_of = as_of_date or date.today().isoformat()
         price_text = "NA" if current_price is None else f"{current_price:.2f}"
         symbol_text = f" ({stock_symbol})" if stock_symbol else ""
-        prompt = f"""You are an experienced financial research analyst covering the Indian stock market.
+        fallback_prompt = f"""You are an experienced financial research analyst covering the Indian stock market.
 Provide consensus analyst view for company <<{company_name}{symbol_text}>> as of {as_of}.
 
 Output strictly in this format:
@@ -297,6 +414,17 @@ Rules:
 - If unavailable, write NA.
 - No extra sections.
 """
+        prompt = self._render_template(
+            template_key="analyst_consensus",
+            context={
+                "company_name": company_name,
+                "stock_symbol": stock_symbol or "",
+                "symbol_text": symbol_text,
+                "as_of_date": as_of,
+                "price_text": price_text,
+            },
+            fallback=fallback_prompt,
+        )
         try:
             target_provider = config.ANALYST_AI_PROVIDER or self.provider
             result = self._generate_with_cache_for_provider(
@@ -346,6 +474,25 @@ Rules:
             except Exception:
                 continue
         return ""
+
+    def _download_pdf_bytes(self, document_url: str, timeout: int = 20) -> bytes:
+        """Download PDF bytes using primary/secondary URL fallback."""
+        for url in self._build_pdf_candidate_urls(document_url):
+            try:
+                response = requests.get(
+                    url,
+                    timeout=timeout,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Referer": "https://www.bseindia.com/",
+                    },
+                )
+                response.raise_for_status()
+                if response.content:
+                    return response.content
+            except Exception:
+                continue
+        return b""
 
     @staticmethod
     def _extract_pdf_filename(value: str) -> str:
@@ -440,8 +587,13 @@ Rules:
 
     def _create_results_prompt(self, stock_symbol: str, announcement_text: str, announcement_type: str) -> str:
         """Prompt template for results filings with structured metrics extraction."""
-        quick_metrics_hint = self._extract_quick_financial_metrics(announcement_text)
-        return f"""You are an AI designed to generate concise summaries of quarterly results based on filings for {stock_symbol}.
+        parsed = FinancialResultParser.parse_from_text(announcement_text)
+        quick_metrics_hint = FinancialResultParser.to_prompt_hint(parsed)
+        # Keep legacy regex extractor as additive fallback context.
+        legacy_hint = self._extract_quick_financial_metrics(announcement_text)
+        if legacy_hint and legacy_hint != "No numeric hints detected.":
+            quick_metrics_hint = f"{quick_metrics_hint}\n\nLegacy hints:\n{legacy_hint}"
+        fallback_prompt = f"""You are an AI designed to generate concise summaries of quarterly results based on filings for {stock_symbol}.
 Your task is to create a structured summary that highlights the most important aspects of the filings without listing all similar filings.
 
 Input:
@@ -469,11 +621,20 @@ Instructions:
 4. Capture notable management commentary briefly and factually.
 5. Ensure clarity, conciseness, and focus on current quarter data only.
 6. Do not enumerate multiple similar filings."""
+        return self._render_template(
+            template_key="results",
+            context={
+                "stock_symbol": stock_symbol,
+                "announcement_type": announcement_type,
+                "announcement_text": announcement_text,
+                "quick_metrics_hint": quick_metrics_hint,
+            },
+            fallback=fallback_prompt,
+        )
 
-    @staticmethod
-    def _create_earnings_call_prompt(stock_symbol: str, announcement_text: str, announcement_type: str) -> str:
+    def _create_earnings_call_prompt(self, stock_symbol: str, announcement_text: str, announcement_type: str) -> str:
         """Prompt template for conference call analysis."""
-        return f"""You are an AI designed to generate concise summaries of conference call transcripts based on filings for {stock_symbol}.
+        fallback_prompt = f"""You are an AI designed to generate concise summaries of conference call transcripts based on filings for {stock_symbol}.
 Your task is to create a structured summary that highlights the most important aspects of the filings without listing all similar filings.
 
 Input:
@@ -505,11 +666,19 @@ Instructions:
 2. Focus on current quarter-relevant data only.
 3. If a section is not present in the source, write 'NA'.
 4. Avoid generic statements and avoid listing repetitive similar filings."""
+        return self._render_template(
+            template_key="earnings_call",
+            context={
+                "stock_symbol": stock_symbol,
+                "announcement_type": announcement_type,
+                "announcement_text": announcement_text,
+            },
+            fallback=fallback_prompt,
+        )
 
-    @staticmethod
-    def _create_non_results_prompt(stock_symbol: str, announcement_text: str, announcement_type: str) -> str:
+    def _create_non_results_prompt(self, stock_symbol: str, announcement_text: str, announcement_type: str) -> str:
         """Prompt template for non-results filings."""
-        return f"""You are an advanced financial announcements analyst.
+        fallback_prompt = f"""You are an advanced financial announcements analyst.
 
 Analyze this announcement for {stock_symbol}.
 Type: {announcement_type}
@@ -524,6 +693,15 @@ Rules:
 1. Keep it brief and factual.
 2. Do not invent numbers or facts not present in the content.
 3. Focus on the key disclosure, timeline, and investor relevance."""
+        return self._render_template(
+            template_key="non_results",
+            context={
+                "stock_symbol": stock_symbol,
+                "announcement_type": announcement_type,
+                "announcement_text": announcement_text,
+            },
+            fallback=fallback_prompt,
+        )
 
     @staticmethod
     def _extract_quick_financial_metrics(announcement_text: str) -> str:
