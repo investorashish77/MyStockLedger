@@ -336,9 +336,14 @@ class AISummaryService:
             max_tokens=max_tokens,
         )
     
-    def generate_summary(self, stock_symbol: str, announcement_text: str, 
-                        announcement_type: str = "ANNOUNCEMENT",
-                        document_url: str = None) -> Optional[Dict]:
+    def generate_summary(
+        self,
+        stock_symbol: str,
+        announcement_text: str,
+        announcement_type: str = "ANNOUNCEMENT",
+        document_url: str = None,
+        supplementary_document_urls: Optional[List[str]] = None,
+    ) -> Optional[Dict]:
         """
         Generate AI summary of corporate announcement
         
@@ -346,6 +351,8 @@ class AISummaryService:
             stock_symbol: Stock symbol (e.g., RELIANCE.NS)
             announcement_text: Full announcement text
             announcement_type: Type of announcement
+            document_url: Primary document URL (results filing / transcript etc.)
+            supplementary_document_urls: Optional list of additional context docs
         
         Returns:
             Dict with summary_text and sentiment, or None if failed
@@ -361,11 +368,30 @@ class AISummaryService:
                 if pdf_bytes:
                     parsed = FinancialResultParser.parse_from_pdf_bytes(pdf_bytes)
                     parsed_result_hint = FinancialResultParser.to_prompt_hint(parsed)
+                    self.logger.info(
+                        "Result parser hint symbol=%s doc=%s hint=%s",
+                        stock_symbol or "-",
+                        document_url,
+                        parsed_result_hint.replace("\n", " ")[:900],
+                    )
+                else:
+                    self.logger.warning(
+                        "Result parser skipped due to empty PDF bytes symbol=%s doc=%s",
+                        stock_symbol or "-",
+                        document_url,
+                    )
             document_text = self._extract_pdf_text_from_url(document_url)
 
         combined_text = announcement_text or ""
         if document_text:
             combined_text = f"{combined_text}\n\n[Extracted PDF Text]\n{document_text}".strip()
+        extra_urls = [u for u in (supplementary_document_urls or []) if u and u != document_url]
+        for idx, extra_url in enumerate(extra_urls[:3], start=1):
+            extra_text = self._extract_pdf_text_from_url(extra_url, max_chars=16000)
+            if extra_text:
+                combined_text = (
+                    f"{combined_text}\n\n[Supplementary Document {idx}]\nURL: {extra_url}\n{extra_text}"
+                ).strip()
         if parsed_result_hint:
             combined_text = f"{combined_text}\n\n[Parsed Result Metrics]\n{parsed_result_hint}".strip()
 

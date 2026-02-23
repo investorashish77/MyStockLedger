@@ -21,7 +21,7 @@ class WatchmanService:
     INSIGHT_CONCALL = "CONCALL_SUMMARY"
     DAILY_RUN_SETTING_KEY = "watchman_last_run_date"
     MIN_SCORE_BY_INSIGHT = {
-        INSIGHT_RESULT: 7,
+        INSIGHT_RESULT: 6,
         INSIGHT_CONCALL: 8,
     }
     MATERIAL_SCAN_LAST_RUN_KEY_PREFIX = "watchman_material_last_run_date_user_"
@@ -321,11 +321,19 @@ class WatchmanService:
         selected_candidate = None
         summary = None
         for candidate in ranked_candidates:
+            supplementary_urls: List[str] = []
+            if insight_type == self.INSIGHT_RESULT:
+                supplementary_urls = self._collect_results_supplementary_urls(
+                    filings=filings,
+                    quarter_label=quarter_label,
+                    primary_candidate=candidate,
+                )
             generated = self.ai_service.generate_summary(
                 stock_symbol=stock.get("symbol") or "",
                 announcement_text=f"{candidate.get('headline') or ''}\n{candidate.get('announcement_summary') or ''}".strip(),
                 announcement_type=announcement_type,
                 document_url=candidate.get("pdf_link"),
+                supplementary_document_urls=supplementary_urls,
             )
             if not generated or not (generated.get("summary_text") or "").strip():
                 continue
@@ -398,7 +406,7 @@ class WatchmanService:
             filing_quarter = self._quarter_from_filing(filing)
             if filing_quarter != quarter_label:
                 continue
-            if not self._is_allowed_category(filing.get("category"), insight_type):
+            if not self._is_allowed_filing_for_insight(filing, insight_type):
                 continue
             score = self._candidate_score(filing, insight_type)
             candidates.append((score, self._normalized_dt_key(filing.get("announcement_date")), filing))
@@ -407,7 +415,52 @@ class WatchmanService:
         candidates.sort(key=lambda row: (row[0], row[1]), reverse=True)
         min_score = self.MIN_SCORE_BY_INSIGHT.get(insight_type, 0)
         ranked = [filing for score, _, filing in candidates if score >= min_score]
+        if not ranked:
+            # Graceful fallback: when strict threshold misses generic "results attached herewith"
+            # filings, allow best positive-scored candidates.
+            ranked = [filing for score, _, filing in candidates if score > 0][:3]
         return ranked
+
+    def _collect_results_supplementary_urls(
+        self,
+        filings: List[Dict],
+        quarter_label: str,
+        primary_candidate: Dict,
+    ) -> List[str]:
+        """Collect same-quarter investor/earnings presentation PDFs for result summarization."""
+        out: List[str] = []
+        primary_link = (primary_candidate.get("pdf_link") or "").strip()
+        for filing in filings:
+            if filing.get("filing_id") == primary_candidate.get("filing_id"):
+                continue
+            if self._quarter_from_filing(filing) != quarter_label:
+                continue
+            link = (filing.get("pdf_link") or "").strip()
+            if not link or link == primary_link:
+                continue
+            text = f"{filing.get('headline') or ''} {filing.get('category') or ''}".lower()
+            if any(
+                token in text
+                for token in (
+                    "investor presentation",
+                    "earnings presentation",
+                    "result presentation",
+                    "q3 presentation",
+                    "q4 presentation",
+                    "q2 presentation",
+                    "q1 presentation",
+                )
+            ):
+                out.append(link)
+        # Preserve order, unique, keep small.
+        seen = set()
+        unique = []
+        for u in out:
+            if u in seen:
+                continue
+            seen.add(u)
+            unique.append(u)
+        return unique[:2]
 
     def _resolve_latest_quarter_for_stock(self, stock_id: int, filings: List[Dict]) -> Optional[str]:
         """Resolve latest quarter for stock.
@@ -431,21 +484,42 @@ class WatchmanService:
         return latest_quarter
 
     @staticmethod
-    def _is_allowed_category(category: str, insight_type: str) -> bool:
-        """Is allowed category.
+    def _is_allowed_filing_for_insight(filing: Dict, insight_type: str) -> bool:
+        """Return True when filing can be considered for the target insight.
 
         Args:
-            category: Input parameter.
+            filing: Input parameter.
             insight_type: Input parameter.
 
         Returns:
             Any: Method output for caller use.
         """
+        category = filing.get("category")
         c = (category or "").strip().lower()
+        text = f"{filing.get('headline') or ''} {filing.get('announcement_summary') or ''} {category or ''}".lower()
         if insight_type == WatchmanService.INSIGHT_RESULT:
-            return c == "results"
+            if any(marker in text for marker in ("monitoring agency report", "monitoring agency")):
+                return False
+            if c == "results":
+                return True
+            if any(marker in text for marker in ("conference call", "earnings call", "concall", "transcript")) and "financial result" not in text:
+                return False
+            # Some exchanges tag result packs as "General Update"/"Announcements".
+            positive_markers = (
+                "financial result",
+                "results for the quarter",
+                "unaudited financial",
+                "audited financial",
+                "statement of financial results",
+                "outcome of the board meeting",
+                "outcome for the just concluded meeting",
+                "results attached herewith",
+            )
+            return any(marker in text for marker in positive_markers)
         if insight_type == WatchmanService.INSIGHT_CONCALL:
-            return c == "earnings call"
+            if c == "earnings call":
+                return True
+            return any(marker in text for marker in ("conference call", "earnings call", "concall", "transcript"))
         return False
 
     @staticmethod
@@ -461,27 +535,81 @@ class WatchmanService:
         """
         text = f"{filing.get('headline') or ''} {filing.get('announcement_summary') or ''}".lower()
         score = 0
+        category_text = (filing.get("category") or "").strip().lower()
         if filing.get("pdf_link"):
             score += 3
+        if category_text == "results":
+            score += 5
         if insight_type == WatchmanService.INSIGHT_RESULT:
-            strong_positive = (
-                "financial result", "financial results", "results for the quarter",
-                "statement of unaudited", "statement of audited", "unaudited financial",
-                "audited financial", "standalone and consolidated", "outcome of board meeting",
-                "investor presentation", "earnings presentation", "quarterly presentation"
+            very_strong_positive = (
+                "statement of financial results",
+                "consolidated statement of financial results",
+                "standalone statement of financial results",
+                "unaudited financial results for the quarter",
+                "audited financial results for the quarter",
+                "results for the quarter ended",
+                "limited review report",
             )
-            weak_positive = ("standalone", "consolidated", "quarter ended", "year ended")
+            strong_positive = (
+                "financial result",
+                "financial results",
+                "unaudited financial",
+                "audited financial",
+                "standalone and consolidated",
+            )
+            weak_positive = ("standalone", "consolidated", "quarter ended")
             strong_negative = (
                 "conference call", "earnings call", "transcript",
                 "call recording", "audio recording", "audio link", "newspaper advertisement",
-                "board meeting intimation", "notice of board meeting"
+                "board meeting intimation", "notice of board meeting",
+                "monitoring agency report", "post buyback", "voting results"
             )
+            medium_negative = (
+                "outcome of board meeting",
+                "investor presentation",
+                "earnings presentation",
+                "quarterly presentation",
+                "press release",
+            )
+            newspaper_negative = (
+                "newspaper publication",
+                "newspaper advertisement",
+                "publication of un-audited financial results",
+                "publication of unaudited financial results",
+            )
+            narrative_negative = (
+                "to considered and approved",
+                "interalia",
+                "closure of trading window",
+                "record date",
+                "date of payment of interim dividend",
+            )
+            for kw in very_strong_positive:
+                if kw in text:
+                    score += 7
             for kw in strong_positive:
                 if kw in text:
                     score += 4
+            if "quarter and nine months ended" in text and "financial result" in text:
+                score += 4
+            if text.startswith("unaudited financial results") or text.startswith("audited financial results"):
+                score += 8
             for kw in weak_positive:
                 if kw in text:
                     score += 1
+            for kw in medium_negative:
+                if kw in text:
+                    score -= 3
+            if "press release" in text and "financial result" in text:
+                score += 6
+            for kw in newspaper_negative:
+                if kw in text:
+                    score -= 35
+            for kw in narrative_negative:
+                if kw in text:
+                    score -= 10
+            if "to considered and approved the followings" in text:
+                score -= 12
             for kw in strong_negative:
                 if kw in text:
                     score -= 6
