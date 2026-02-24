@@ -1,6 +1,6 @@
 """
 UI tests for PortfolioView.
-Verifies that row-level Edit/Delete action buttons render for each stock.
+Verifies that row-level actions include transactions and sell flow.
 """
 
 import os
@@ -100,8 +100,8 @@ class TestPortfolioViewUI(unittest.TestCase):
             thesis="Test thesis"
         )
 
-    def test_portfolio_rows_render_edit_delete_buttons(self):
-        """Test portfolio rows render edit delete buttons.
+    def test_portfolio_rows_render_view_and_sell_actions(self):
+        """Test portfolio rows render view transactions + sell actions.
 
         Args:
             None.
@@ -129,7 +129,7 @@ class TestPortfolioViewUI(unittest.TestCase):
         self.assertIsNotNone(menu)
         action_labels = {action.text() for action in menu.actions() if action.text().strip()}
         self.assertIn("View Transactions", action_labels)
-        self.assertIn("Delete Stock", action_labels)
+        self.assertIn("Sell", action_labels)
 
     def test_portfolio_row_hover_shows_investment_note(self):
         """Test portfolio row hover shows investment note.

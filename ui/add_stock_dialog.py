@@ -48,6 +48,7 @@ class AddStockDialog(QDialog):
         self.symbol_completer = QCompleter(self.symbol_suggestions_model, self)
         self.symbol_completer.setCaseSensitivity(Qt.CaseInsensitive)
         self.symbol_completer.setFilterMode(Qt.MatchContains)
+        self.symbol_completer.popup().setObjectName("symbolCompleterPopup")
         
         self.setup_ui()
         self._apply_active_theme()
@@ -197,8 +198,16 @@ class AddStockDialog(QDialog):
     def _apply_active_theme(self):
         """Inherit currently active theme from main window."""
         win = self.parent().window() if self.parent() else None
-        if win and hasattr(win, "styleSheet"):
-            self.setStyleSheet(win.styleSheet())
+        theme_css = win.styleSheet() if win and hasattr(win, "styleSheet") else ""
+        if not theme_css:
+            from PyQt5.QtWidgets import QApplication
+            app = QApplication.instance()
+            theme_css = app.styleSheet() if app else ""
+
+        if theme_css:
+            self.setStyleSheet(theme_css)
+            popup = self.symbol_completer.popup()
+            popup.setStyleSheet(theme_css)
     
     def on_symbol_changed(self, text):
         """Debounce symbol lookup when input changes."""

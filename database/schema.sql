@@ -35,8 +35,23 @@ CREATE TABLE IF NOT EXISTS transactions (
     risk_tags TEXT,
     mistake_tags TEXT,
     reflection_note TEXT,
+    realized_pnl REAL,
+    realized_cost_basis REAL,
+    realized_match_method TEXT,
+    sell_note TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (stock_id) REFERENCES stocks(stock_id)
+);
+
+CREATE TABLE IF NOT EXISTS transaction_lot_matches (
+    match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sell_transaction_id INTEGER NOT NULL,
+    buy_transaction_id INTEGER NOT NULL,
+    matched_quantity INTEGER NOT NULL,
+    buy_price_per_share REAL NOT NULL,
+    sell_price_per_share REAL NOT NULL,
+    realized_pnl REAL NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Alerts Table

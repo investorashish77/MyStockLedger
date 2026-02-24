@@ -8,7 +8,7 @@ import sys
 import os
 import tempfile
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
 from unittest.mock import patch, MagicMock
 
 # Add parent directory to path
@@ -265,6 +265,72 @@ class TestDatabaseManager(unittest.TestCase):
         self.assertEqual(portfolio[0]['symbol'], "AAPL")
         self.assertEqual(portfolio[0]['quantity'], 10)
         self.assertEqual(portfolio[0]['avg_price'], 100.0)
+
+    def test_sell_transaction_computes_fifo_realized_pnl(self):
+        """SELL transaction should compute realized pnl using FIFO lots."""
+        user_id = self.db.create_user("9876543201", "FIFO User", "hash")
+        stock_id = self.db.add_stock(user_id, "AAPL", "Apple Inc.", "NASDAQ")
+        self.db.add_transaction(stock_id, "BUY", 10, 100.0, "2026-01-01", "LONG")
+        self.db.add_transaction(stock_id, "BUY", 10, 120.0, "2026-01-10", "LONG")
+
+        sell_tx = self.db.add_transaction(
+            stock_id=stock_id,
+            transaction_type="SELL",
+            quantity=15,
+            price_per_share=130.0,
+            transaction_date="2026-02-01",
+            investment_horizon="LONG",
+        )
+        tx = self.db.get_transaction_by_id(sell_tx)
+        # FIFO cost basis = (10*100) + (5*120) = 1600
+        # sell value = 15*130 = 1950, realized pnl = 350
+        self.assertAlmostEqual(tx["realized_cost_basis"], 1600.0, places=2)
+        self.assertAlmostEqual(tx["realized_pnl"], 350.0, places=2)
+
+        portfolio = self.db.get_portfolio_summary(user_id)
+        self.assertEqual(len(portfolio), 1)
+        self.assertEqual(portfolio[0]["quantity"], 5)
+
+    def test_sell_transaction_rejects_when_quantity_exceeds_holdings(self):
+        """SELL quantity greater than available should raise validation error."""
+        user_id = self.db.create_user("9876543202", "Sell Guard", "hash")
+        stock_id = self.db.add_stock(user_id, "MSFT", "Microsoft Corp.", "NASDAQ")
+        self.db.add_transaction(stock_id, "BUY", 5, 200.0, "2026-01-01", "LONG")
+        with self.assertRaises(ValueError):
+            self.db.add_transaction(
+                stock_id=stock_id,
+                transaction_type="SELL",
+                quantity=6,
+                price_per_share=220.0,
+                transaction_date="2026-01-15",
+                investment_horizon="LONG",
+            )
+
+    def test_realized_pnl_summary_uses_indian_financial_year(self):
+        """FY rollup should include SELL transactions within Apr-Mar window."""
+        user_id = self.db.create_user("9876543203", "FY User", "hash")
+        stock_id = self.db.add_stock(user_id, "INFY", "Infosys Ltd", "NSE")
+        self.db.add_transaction(stock_id, "BUY", 10, 100.0, "2025-03-20", "LONG")
+        # Falls in FY25-26 (starts 2025-04-01)
+        self.db.add_transaction(stock_id, "SELL", 5, 130.0, "2025-04-05", "LONG")
+        # Falls in FY26-27 (starts 2026-04-01)
+        self.db.add_transaction(stock_id, "SELL", 2, 140.0, "2026-04-02", "LONG")
+
+        fy_2526 = self.db.get_realized_pnl_summary(
+            user_id,
+            fy_start=date(2025, 4, 1),
+            fy_end=date(2026, 3, 31),
+        )
+        self.assertAlmostEqual(fy_2526["total_realized_pnl"], 150.0, places=2)
+        self.assertEqual(fy_2526["sell_transaction_count"], 1)
+
+        fy_2627 = self.db.get_realized_pnl_summary(
+            user_id,
+            fy_start=date(2026, 4, 1),
+            fy_end=date(2027, 3, 31),
+        )
+        self.assertAlmostEqual(fy_2627["total_realized_pnl"], 80.0, places=2)
+        self.assertEqual(fy_2627["sell_transaction_count"], 1)
 
     def test_update_transaction_including_type(self):
         """Test updating transaction fields including transaction_type"""

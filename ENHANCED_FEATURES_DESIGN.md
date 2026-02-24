@@ -877,3 +877,75 @@ Use this checklist for each task (`ITER-*`):
    - rerun `python scripts/ai_code_review.py --base main` and verify no unresolved must-fix findings.
 8. Completion:
    - update task status to `Done` only after steps 1-7 are satisfied.
+
+---
+
+## 12. Realized Profit/Loss (High Priority)
+
+### 12.1 Objective
+
+Implement a non-destructive sell workflow and track realized profit/loss at:
+
+1. Transaction level (each sell).
+2. Stock level (aggregate of sells).
+3. Portfolio level (aggregate across stocks for selected FY).
+
+Indian financial year is used for rollups: `01-Apr-YYYY` to `31-Mar-(YYYY+1)`.
+
+### 12.2 Product Behavior
+
+1. Portfolio row action replaces `Delete Stock` with `Sell`.
+2. Sell action opens a sell form with:
+   - available quantity,
+   - sell quantity,
+   - sell price,
+   - sell date,
+   - optional sell note.
+3. Sell is validated against available quantity; oversell is blocked.
+4. Realized P/L is computed with FIFO lot matching.
+5. Portfolio summary shows Realized P/L widget for current Indian FY.
+6. Global KPI strip includes `Realized P/L (Current FY)`.
+
+### 12.3 Data Model
+
+`transactions` enhancements:
+
+1. `realized_pnl` (REAL)
+2. `realized_cost_basis` (REAL)
+3. `realized_match_method` (TEXT)
+4. `sell_note` (TEXT)
+
+New table:
+
+`transaction_lot_matches`
+
+1. `sell_transaction_id`
+2. `buy_transaction_id`
+3. `matched_quantity`
+4. `buy_price_per_share`
+5. `sell_price_per_share`
+6. `realized_pnl`
+
+### 12.4 Calculation Rules
+
+1. FIFO for sell matching against buy lots.
+2. Realized P/L per matched lot:
+   - `(sell_price - buy_price) * matched_quantity`
+3. Sell transaction stores:
+   - total realized P/L,
+   - total realized cost basis,
+   - match method = `FIFO`.
+4. FY rollup includes only `SELL` transactions with sell date in FY window.
+
+### 12.5 UX/Guardrails
+
+1. Sell transactions preserve audit trail; no stock-level destructive delete from row menu.
+2. In transaction history, `SELL` edit/delete actions are disabled to prevent ledger inconsistency.
+3. Sell success dialog shows computed realized P/L.
+
+### 12.6 Tests (Priority P0)
+
+1. FIFO realized P/L from multiple buy lots.
+2. Oversell validation.
+3. Indian FY realized rollup boundary correctness.
+4. Portfolio row actions include `View Transactions` + `Sell`.

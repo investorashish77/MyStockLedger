@@ -5,8 +5,9 @@ Displays user's stock portfolio with P&L calculations
 
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QTableWidget, QTableWidgetItem, QLabel, QHeaderView,
-                             QMessageBox, QDialog, QFrame, QToolButton, QMenu, QAction, QProgressBar)
-from PyQt5.QtCore import Qt
+                             QMessageBox, QDialog, QFrame, QToolButton, QMenu, QAction, QProgressBar,
+                             QFormLayout, QSpinBox, QDoubleSpinBox, QDateEdit, QTextEdit, QDialogButtonBox)
+from PyQt5.QtCore import Qt, QDate
 from PyQt5.QtGui import QFont, QColor
 from database.db_manager import DatabaseManager
 from services.stock_service import StockService
@@ -203,7 +204,7 @@ class PortfolioView(QWidget):
                 pnl_item.setForeground(QColor('#F44336'))
             self.table.setItem(i, 6, pnl_item)
 
-            self.table.setCellWidget(i, 7, self._build_actions_cell(stock['stock_id'], symbol))
+            self.table.setCellWidget(i, 7, self._build_actions_cell(stock['stock_id'], symbol, int(quantity)))
         
         # Update summary
         total_pnl = total_current_value - total_invested
@@ -211,12 +212,18 @@ class PortfolioView(QWidget):
         
         summary_color = '#4CAF50' if total_pnl >= 0 else '#F44336'
         
+        realized = self.db.get_realized_pnl_summary(user_id)
+        realized_value = realized.get("total_realized_pnl", 0.0)
+        realized_color = '#4CAF50' if realized_value >= 0 else '#F44336'
         self.summary_label.setText(f"""
             <b>Portfolio Summary:</b> &nbsp;&nbsp;
             Total Invested: ₹{total_invested:,.2f} &nbsp;|&nbsp;
             Current Value: ₹{total_current_value:,.2f} &nbsp;|&nbsp;
             <span style='color: {summary_color};'>
             P&L: ₹{total_pnl:,.2f} ({total_pnl_pct:+.2f}%)
+            </span> &nbsp;|&nbsp;
+            <span style='color: {realized_color};'>
+            Realized P/L ({realized.get('fy_label')}): ₹{realized_value:,.2f}
             </span>
         """)
 
@@ -363,7 +370,7 @@ class PortfolioView(QWidget):
         widget.setLayout(layout)
         return widget
 
-    def _build_actions_cell(self, stock_id: int, symbol: str) -> QWidget:
+    def _build_actions_cell(self, stock_id: int, symbol: str, available_qty: int) -> QWidget:
         """Build actions cell.
 
         Args:
@@ -380,13 +387,13 @@ class PortfolioView(QWidget):
         menu_btn.setText("⋮")
         menu_btn.setPopupMode(QToolButton.InstantPopup)
         menu = QMenu(menu_btn)
+        self._apply_active_theme(menu)
         open_action = QAction("View Transactions", menu_btn)
         open_action.triggered.connect(lambda: self.open_stock_transactions(stock_id, symbol))
-        delete_action = QAction("Delete Stock", menu_btn)
-        delete_action.triggered.connect(lambda: self.delete_stock_position(stock_id, symbol))
+        sell_action = QAction("Sell", menu_btn)
+        sell_action.triggered.connect(lambda: self.open_sell_dialog(stock_id, symbol, available_qty))
         menu.addAction(open_action)
-        menu.addSeparator()
-        menu.addAction(delete_action)
+        menu.addAction(sell_action)
         menu_btn.setMenu(menu)
         layout.addWidget(menu_btn)
         layout.addStretch()
@@ -407,11 +414,11 @@ class PortfolioView(QWidget):
         
         # Transaction table
         table = QTableWidget()
-        table.setColumnCount(9)
+        table.setColumnCount(10)
         table.setHorizontalHeaderLabels([
-            'Date', 'Type', 'Qty', 'Price', 'Horizon', 'Target', 'Note', 'Actions', 'ID'
+            'Date', 'Type', 'Qty', 'Price', 'Horizon', 'Target', 'Note', 'Realized P/L', 'Actions', 'ID'
         ])
-        table.hideColumn(8)  # Hide ID column
+        table.hideColumn(9)  # Hide ID column
         
         for i, trans in enumerate(transactions):
             table.insertRow(i)
@@ -428,6 +435,13 @@ class PortfolioView(QWidget):
             note_item = QTableWidgetItem(note_text if len(note_text) <= 80 else f"{note_text[:77]}...")
             note_item.setToolTip(note_text)
             table.setItem(i, 6, note_item)
+
+            realized_pnl = trans.get('realized_pnl')
+            realized_item = QTableWidgetItem("" if realized_pnl is None else f"₹{float(realized_pnl):,.2f}")
+            if realized_pnl is not None:
+                color = QColor('#4CAF50') if float(realized_pnl) >= 0 else QColor('#F44336')
+                realized_item.setForeground(color)
+            table.setItem(i, 7, realized_item)
             
             # Action buttons
             actions = QWidget()
@@ -435,14 +449,21 @@ class PortfolioView(QWidget):
             actions_layout.setContentsMargins(5, 2, 5, 2)
             
             edit_btn = QPushButton("Edit")
+            is_sell = (trans.get("transaction_type") or "").upper() == "SELL"
+            edit_btn.setEnabled(not is_sell)
+            if is_sell:
+                edit_btn.setToolTip("Editing SELL transactions is disabled to keep realized P/L audit trail consistent.")
             edit_btn.clicked.connect(
-                lambda checked, t_id=trans['transaction_id']: 
+                lambda checked, t_id=trans['transaction_id']:
                 self.edit_transaction(t_id, dialog)
             )
             actions_layout.addWidget(edit_btn)
-            
+
             delete_btn = QPushButton("Delete")
             delete_btn.setStyleSheet("background-color: #f44336; color: white;")
+            delete_btn.setEnabled(not is_sell)
+            if is_sell:
+                delete_btn.setToolTip("Deleting SELL transactions is disabled to keep realized P/L audit trail consistent.")
             delete_btn.clicked.connect(
                 lambda checked, t_id=trans['transaction_id']: 
                 self.delete_transaction(t_id, dialog)
@@ -450,10 +471,10 @@ class PortfolioView(QWidget):
             actions_layout.addWidget(delete_btn)
             
             actions.setLayout(actions_layout)
-            table.setCellWidget(i, 7, actions)
+            table.setCellWidget(i, 8, actions)
             
             # Store transaction ID
-            table.setItem(i, 8, QTableWidgetItem(str(trans['transaction_id'])))
+            table.setItem(i, 9, QTableWidgetItem(str(trans['transaction_id'])))
         
         layout.addWidget(table)
         
@@ -526,3 +547,74 @@ class PortfolioView(QWidget):
                 self.load_portfolio(self.current_user_id)
             else:
                 QMessageBox.critical(self, "Error", "Failed to delete stock position.")
+
+    def open_sell_dialog(self, stock_id: int, symbol: str, available_qty: int):
+        """Open sell dialog and persist a SELL transaction."""
+        if available_qty <= 0:
+            QMessageBox.information(self, "Sell", f"No available quantity to sell for {symbol}.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Sell {symbol}")
+        dialog.setMinimumWidth(420)
+        self._apply_active_theme(dialog)
+        root = QVBoxLayout(dialog)
+        form = QFormLayout()
+
+        holding_lbl = QLabel(f"Available Quantity: {available_qty}")
+        form.addRow("Holding:", holding_lbl)
+
+        qty = QSpinBox()
+        qty.setRange(1, int(available_qty))
+        qty.setValue(1)
+        form.addRow("Sell Quantity:", qty)
+
+        price = QDoubleSpinBox()
+        price.setRange(0.01, 10000000)
+        price.setDecimals(2)
+        price.setValue(1.0)
+        form.addRow("Sell Price:", price)
+
+        date_edit = QDateEdit()
+        date_edit.setCalendarPopup(True)
+        date_edit.setDate(QDate.currentDate())
+        form.addRow("Sell Date:", date_edit)
+
+        note = QTextEdit()
+        note.setMaximumHeight(80)
+        note.setPlaceholderText("Optional sell note")
+        form.addRow("Note:", note)
+        root.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        root.addWidget(buttons)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        txs = self.db.get_stock_transactions(stock_id)
+        horizon = txs[0].get("investment_horizon") if txs else "LONG"
+        try:
+            tx_id = self.db.add_transaction(
+                stock_id=stock_id,
+                transaction_type="SELL",
+                quantity=int(qty.value()),
+                price_per_share=float(price.value()),
+                transaction_date=date_edit.date().toString("yyyy-MM-dd"),
+                investment_horizon=horizon or "LONG",
+                sell_note=note.toPlainText().strip() or None,
+            )
+            tx = self.db.get_transaction_by_id(tx_id)
+            realized_pnl = float((tx or {}).get("realized_pnl") or 0.0)
+            QMessageBox.information(
+                self,
+                "Sell Executed",
+                f"{symbol}: Sell transaction saved.\nRealized P/L: ₹{realized_pnl:,.2f}",
+            )
+            self.load_portfolio(self.current_user_id)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Sell Validation", str(exc))
+        except Exception as exc:
+            QMessageBox.critical(self, "Sell Failed", f"Unable to record sell transaction.\n{exc}")

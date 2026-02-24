@@ -5,9 +5,9 @@ Handles all database operations for the Equity Tracker app
 
 import sqlite3
 import json
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 class DatabaseManager:
     """Manages database operations"""
@@ -149,6 +149,29 @@ class DatabaseManager:
             cursor.execute("ALTER TABLE transactions ADD COLUMN mistake_tags TEXT")
         if has_column("transactions", "reflection_note") is False:
             cursor.execute("ALTER TABLE transactions ADD COLUMN reflection_note TEXT")
+        if has_column("transactions", "realized_pnl") is False:
+            cursor.execute("ALTER TABLE transactions ADD COLUMN realized_pnl REAL")
+        if has_column("transactions", "realized_cost_basis") is False:
+            cursor.execute("ALTER TABLE transactions ADD COLUMN realized_cost_basis REAL")
+        if has_column("transactions", "realized_match_method") is False:
+            cursor.execute("ALTER TABLE transactions ADD COLUMN realized_match_method TEXT")
+        if has_column("transactions", "sell_note") is False:
+            cursor.execute("ALTER TABLE transactions ADD COLUMN sell_note TEXT")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS transaction_lot_matches (
+                match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sell_transaction_id INTEGER NOT NULL,
+                buy_transaction_id INTEGER NOT NULL,
+                matched_quantity INTEGER NOT NULL,
+                buy_price_per_share REAL NOT NULL,
+                sell_price_per_share REAL NOT NULL,
+                realized_pnl REAL NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tx_lot_match_sell ON transaction_lot_matches(sell_transaction_id)"
+        )
 
         # Filings category override fields.
         if has_column("filings", "category_override") is False:
@@ -405,26 +428,167 @@ class DatabaseManager:
                        investment_horizon: str, target_price: float = None,
                        thesis: str = None, setup_type: str = None,
                        confidence_score: int = None, risk_tags: str = None,
-                       mistake_tags: str = None, reflection_note: str = None) -> int:
-        """Add a buy/sell transaction"""
+                       mistake_tags: str = None, reflection_note: str = None,
+                       realized_pnl: float = None, realized_cost_basis: float = None,
+                       realized_match_method: str = None, sell_note: str = None) -> int:
+        """Add a buy/sell transaction.
+
+        For SELL transactions, realized P/L is calculated with FIFO lots unless
+        explicit realized fields are supplied by caller.
+        """
+        tx_type = (transaction_type or "").strip().upper()
+        if tx_type not in {"BUY", "SELL"}:
+            raise ValueError("transaction_type must be BUY or SELL")
+        if quantity <= 0:
+            raise ValueError("quantity must be > 0")
+        if price_per_share is None or float(price_per_share) <= 0:
+            raise ValueError("price_per_share must be > 0")
+
         conn = self.get_connection()
         cursor = conn.cursor()
-        
-        cursor.execute("""
-            INSERT INTO transactions 
-            (stock_id, transaction_type, quantity, price_per_share, transaction_date,
-             investment_horizon, target_price, thesis, setup_type, confidence_score,
-             risk_tags, mistake_tags, reflection_note)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (stock_id, transaction_type, quantity, price_per_share, transaction_date,
-              investment_horizon, target_price, thesis, setup_type, confidence_score,
-              risk_tags, mistake_tags, reflection_note))
-        
-        transaction_id = cursor.lastrowid
-        conn.commit()
-        self._close_connection(conn)
-        
-        return transaction_id
+        cursor.execute("BEGIN IMMEDIATE")
+
+        try:
+            if tx_type == "SELL" and (realized_pnl is None or realized_cost_basis is None):
+                realized_pnl, realized_cost_basis, lot_matches = self._compute_fifo_realized_for_sell(
+                    conn=conn,
+                    stock_id=stock_id,
+                    sell_quantity=quantity,
+                    sell_price=float(price_per_share),
+                )
+                realized_match_method = realized_match_method or "FIFO"
+            else:
+                lot_matches = []
+
+            cursor.execute("""
+                INSERT INTO transactions
+                (stock_id, transaction_type, quantity, price_per_share, transaction_date,
+                 investment_horizon, target_price, thesis, setup_type, confidence_score,
+                 risk_tags, mistake_tags, reflection_note, realized_pnl, realized_cost_basis,
+                 realized_match_method, sell_note)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (stock_id, tx_type, quantity, price_per_share, transaction_date,
+                  investment_horizon, target_price, thesis, setup_type, confidence_score,
+                  risk_tags, mistake_tags, reflection_note, realized_pnl, realized_cost_basis,
+                  realized_match_method, sell_note))
+
+            transaction_id = cursor.lastrowid
+
+            if tx_type == "SELL" and lot_matches:
+                cursor.executemany(
+                    """
+                    INSERT INTO transaction_lot_matches
+                    (sell_transaction_id, buy_transaction_id, matched_quantity,
+                     buy_price_per_share, sell_price_per_share, realized_pnl)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            transaction_id,
+                            m["buy_transaction_id"],
+                            m["matched_quantity"],
+                            m["buy_price_per_share"],
+                            m["sell_price_per_share"],
+                            m["realized_pnl"],
+                        )
+                        for m in lot_matches
+                    ],
+                )
+
+            conn.commit()
+            return transaction_id
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._close_connection(conn)
+
+    def _get_stock_latest_transaction_date(self, conn, stock_id: int) -> Optional[str]:
+        """Return latest transaction date for a stock."""
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT MAX(transaction_date) FROM transactions WHERE stock_id = ?",
+            (stock_id,),
+        )
+        row = cursor.fetchone()
+        return row[0] if row and row[0] else None
+
+    def _compute_fifo_realized_for_sell(
+        self,
+        conn,
+        stock_id: int,
+        sell_quantity: int,
+        sell_price: float,
+    ) -> Tuple[float, float, List[Dict]]:
+        """Compute FIFO realized P/L and lot-level matches for a sell transaction."""
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT transaction_id, transaction_type, quantity, price_per_share
+            FROM transactions
+            WHERE stock_id = ?
+            ORDER BY transaction_date ASC, transaction_id ASC
+            """,
+            (stock_id,),
+        )
+        rows = cursor.fetchall()
+
+        lots: List[Dict] = []
+        for tx_id, tx_type, qty, price in rows:
+            t = (tx_type or "").upper()
+            if t == "BUY":
+                lots.append({
+                    "buy_transaction_id": tx_id,
+                    "remaining_qty": int(qty or 0),
+                    "buy_price_per_share": float(price or 0.0),
+                })
+            elif t == "SELL":
+                remaining_to_match = int(qty or 0)
+                for lot in lots:
+                    if remaining_to_match <= 0:
+                        break
+                    available = lot["remaining_qty"]
+                    if available <= 0:
+                        continue
+                    matched = min(available, remaining_to_match)
+                    lot["remaining_qty"] -= matched
+                    remaining_to_match -= matched
+
+        available_qty = sum(max(0, lot["remaining_qty"]) for lot in lots)
+        if sell_quantity > available_qty:
+            raise ValueError(
+                f"Sell quantity {sell_quantity} exceeds available holdings {available_qty}"
+            )
+
+        lot_matches: List[Dict] = []
+        to_sell = sell_quantity
+        realized_pnl = 0.0
+        realized_cost_basis = 0.0
+        for lot in lots:
+            if to_sell <= 0:
+                break
+            available = lot["remaining_qty"]
+            if available <= 0:
+                continue
+            matched = min(available, to_sell)
+            buy_price = float(lot["buy_price_per_share"])
+            pnl = (sell_price - buy_price) * matched
+            cost = buy_price * matched
+            realized_pnl += pnl
+            realized_cost_basis += cost
+            lot_matches.append({
+                "buy_transaction_id": lot["buy_transaction_id"],
+                "matched_quantity": matched,
+                "buy_price_per_share": buy_price,
+                "sell_price_per_share": sell_price,
+                "realized_pnl": pnl,
+            })
+            to_sell -= matched
+
+        if to_sell != 0:
+            raise ValueError("Sell matching failed due to insufficient FIFO lots")
+
+        return realized_pnl, realized_cost_basis, lot_matches
     
     def get_stock_transactions(self, stock_id: int) -> List[Dict]:
         """Get all transactions for a stock"""
@@ -434,7 +598,8 @@ class DatabaseManager:
         cursor.execute("""
             SELECT transaction_id, transaction_type, quantity, price_per_share,
                    transaction_date, investment_horizon, target_price, thesis,
-                   setup_type, confidence_score, risk_tags, mistake_tags, reflection_note
+                   setup_type, confidence_score, risk_tags, mistake_tags, reflection_note,
+                   realized_pnl, realized_cost_basis, realized_match_method, sell_note
             FROM transactions WHERE stock_id = ?
             ORDER BY transaction_date DESC
         """, (stock_id,))
@@ -455,6 +620,10 @@ class DatabaseManager:
                 'risk_tags': row[10],
                 'mistake_tags': row[11],
                 'reflection_note': row[12],
+                'realized_pnl': row[13],
+                'realized_cost_basis': row[14],
+                'realized_match_method': row[15],
+                'sell_note': row[16],
             })
         
         self._close_connection(conn)
@@ -533,6 +702,88 @@ class DatabaseManager:
         
         self._close_connection(conn)
         return portfolio
+
+    @staticmethod
+    def get_indian_financial_year_bounds(ref_date: Optional[date] = None) -> Tuple[date, date, str]:
+        """Return India FY start/end dates and label for a reference date."""
+        d = ref_date or date.today()
+        fy_start_year = d.year if d.month >= 4 else d.year - 1
+        start = date(fy_start_year, 4, 1)
+        end = date(fy_start_year + 1, 3, 31)
+        label = f"FY{str(fy_start_year)[-2:]}-{str(fy_start_year + 1)[-2:]}"
+        return start, end, label
+
+    def get_realized_pnl_summary(
+        self,
+        user_id: int,
+        fy_start: Optional[date] = None,
+        fy_end: Optional[date] = None,
+    ) -> Dict:
+        """Get realized P/L rollup for a user in the selected Indian FY window."""
+        if fy_start is None or fy_end is None:
+            fy_start, fy_end, fy_label = self.get_indian_financial_year_bounds()
+        else:
+            fy_label = f"FY{str(fy_start.year)[-2:]}-{str(fy_end.year)[-2:]}"
+
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                COALESCE(SUM(t.realized_pnl), 0),
+                COUNT(*)
+            FROM transactions t
+            JOIN stocks s ON s.stock_id = t.stock_id
+            WHERE s.user_id = ?
+              AND UPPER(t.transaction_type) = 'SELL'
+              AND t.transaction_date >= ?
+              AND t.transaction_date <= ?
+            """,
+            (user_id, fy_start.isoformat(), fy_end.isoformat()),
+        )
+        total_row = cursor.fetchone() or (0.0, 0)
+        total_realized = float(total_row[0] or 0.0)
+        sell_count = int(total_row[1] or 0)
+
+        cursor.execute(
+            """
+            SELECT
+                s.stock_id,
+                s.symbol,
+                s.company_name,
+                COALESCE(SUM(t.realized_pnl), 0) AS realized_pnl,
+                COUNT(*) AS sell_count
+            FROM transactions t
+            JOIN stocks s ON s.stock_id = t.stock_id
+            WHERE s.user_id = ?
+              AND UPPER(t.transaction_type) = 'SELL'
+              AND t.transaction_date >= ?
+              AND t.transaction_date <= ?
+            GROUP BY s.stock_id, s.symbol, s.company_name
+            ORDER BY realized_pnl DESC, s.symbol ASC
+            """,
+            (user_id, fy_start.isoformat(), fy_end.isoformat()),
+        )
+        per_stock = [
+            {
+                "stock_id": row[0],
+                "symbol": row[1],
+                "company_name": row[2],
+                "realized_pnl": float(row[3] or 0.0),
+                "sell_count": int(row[4] or 0),
+            }
+            for row in cursor.fetchall()
+        ]
+        self._close_connection(conn)
+
+        return {
+            "fy_label": fy_label,
+            "fy_start": fy_start.isoformat(),
+            "fy_end": fy_end.isoformat(),
+            "total_realized_pnl": total_realized,
+            "sell_transaction_count": sell_count,
+            "per_stock": per_stock,
+        }
     
     # Alert operations
     def add_alert(self, stock_id: int, alert_type: str, alert_message: str,
@@ -1837,7 +2088,8 @@ class DatabaseManager:
             SELECT transaction_id, stock_id, transaction_type, quantity, 
                 price_per_share, transaction_date, investment_horizon,
                 target_price, thesis, setup_type, confidence_score,
-                risk_tags, mistake_tags, reflection_note
+                risk_tags, mistake_tags, reflection_note,
+                realized_pnl, realized_cost_basis, realized_match_method, sell_note
             FROM transactions WHERE transaction_id = ?
         ''', (transaction_id,))
         
@@ -1860,6 +2112,10 @@ class DatabaseManager:
                 'risk_tags': row[11],
                 'mistake_tags': row[12],
                 'reflection_note': row[13],
+                'realized_pnl': row[14],
+                'realized_cost_basis': row[15],
+                'realized_match_method': row[16],
+                'sell_note': row[17],
             }
         return None
 

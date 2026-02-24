@@ -98,9 +98,11 @@ class MainWindow(QMainWindow):
         self.global_daily_kpi = self._build_kpi_card("Daily Gain/Loss")
         self.global_weekly_kpi = self._build_kpi_card("Weekly Gain/Loss")
         self.global_total_kpi = self._build_kpi_card("Total Returns")
+        self.global_realized_kpi = self._build_kpi_card("Realized P/L (Current FY)")
         kpi_row.addWidget(self.global_daily_kpi)
         kpi_row.addWidget(self.global_weekly_kpi)
         kpi_row.addWidget(self.global_total_kpi)
+        kpi_row.addWidget(self.global_realized_kpi)
         main_layout.addLayout(kpi_row)
 
         # Main shell: fixed sidebar + dynamic center content
@@ -495,6 +497,11 @@ class MainWindow(QMainWindow):
         self._set_kpi_value(self.global_daily_kpi, total_daily, daily_pct)
         self._set_kpi_value(self.global_weekly_kpi, total_weekly, weekly_pct)
         self._set_kpi_value(self.global_total_kpi, total_returns, total_pct)
+        realized = self.db.get_realized_pnl_summary(user_id)
+        realized_value = float(realized.get("total_realized_pnl") or 0.0)
+        self._set_kpi_value(self.global_realized_kpi, realized_value, 0.0)
+        self.global_realized_kpi._sub.setText(realized.get("fy_label", "Current FY"))
+        self.global_realized_kpi._sub.setStyleSheet("color: #9FB0C4;")
 
     @staticmethod
     def _set_kpi_value(card: QFrame, value: float, pct: float):
@@ -545,6 +552,12 @@ class MainWindow(QMainWindow):
         )
         self._apply_shadow(
             self.global_total_kpi,
+            blur=preset["kpi_blur"],
+            y_offset=preset["kpi_offset"],
+            alpha=preset["kpi_alpha"]
+        )
+        self._apply_shadow(
+            self.global_realized_kpi,
             blur=preset["kpi_blur"],
             y_offset=preset["kpi_offset"],
             alpha=preset["kpi_alpha"]

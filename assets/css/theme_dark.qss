@@ -198,6 +198,34 @@ QComboBox QAbstractItemView {
     outline: 0;
 }
 
+QListView#symbolCompleterPopup, QAbstractItemView#symbolCompleterPopup {
+    background: #1F2A36;
+    color: #E2E8F0;
+    border: 1px solid #314255;
+    selection-background-color: #3D5AFE;
+    selection-color: #FFFFFF;
+    outline: 0;
+}
+
+QMenu {
+    background: #1F2A36;
+    color: #E2E8F0;
+    border: 1px solid #314255;
+    padding: 4px;
+}
+
+QMenu::item {
+    background: transparent;
+    color: #E2E8F0;
+    padding: 8px 16px;
+    border-radius: 6px;
+}
+
+QMenu::item:selected {
+    background: #3D5AFE;
+    color: #FFFFFF;
+}
+
 QTableWidget {
     background: #1F2A36;
     border: 1px solid rgba(120, 160, 200, 0.18);
