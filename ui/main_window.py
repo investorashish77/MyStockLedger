@@ -5,13 +5,16 @@ The main application window with portfolio, alerts, and settings
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QStackedWidget, QLabel, QPushButton, QMessageBox,
-                             QStatusBar, QMenuBar, QMenu, QAction, QDialog, QFrame, QSlider, QGraphicsDropShadowEffect,
-                             QListWidget, QListWidgetItem)
-from PyQt5.QtCore import Qt, QTimer, QUrl
-from PyQt5.QtGui import QFont, QPixmap, QIcon, QColor, QDesktopServices
+                             QStatusBar, QMenuBar, QMenu, QAction, QDialog, QFrame, QGraphicsDropShadowEffect,
+                             QListWidget, QListWidgetItem, QAbstractItemView, QToolButton, QInputDialog)
+from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from PyQt5.QtGui import QPixmap, QIcon, QColor, QDesktopServices
 from pathlib import Path
 from time import perf_counter
+from datetime import datetime, timedelta
+import threading
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from database.db_manager import DatabaseManager
 from services.stock_service import StockService
 from services.alert_service import AlertService
@@ -19,7 +22,7 @@ from services.ai_summary_service import AISummaryService
 from services.background_job_service import BackgroundJobService
 from ui.login_dialog import LoginDialog
 from ui.dashboard_view import DashboardView
-from ui.portfolio_view import PortfolioView
+from ui.journal_view import JournalView
 from ui.alerts_view import AlertsView
 from ui.insights_view import InsightsView
 from utils.config import config
@@ -27,6 +30,7 @@ from utils.logger import get_logger
 
 class MainWindow(QMainWindow):
     """Main application window"""
+    quote_refresh_finished = pyqtSignal(int, int, str, float, str)
     
     def __init__(self):
         """Init.
@@ -55,6 +59,8 @@ class MainWindow(QMainWindow):
         self.current_user = None
         self.current_theme = "dark"
         self._is_refreshing = False
+        self._quote_refresh_in_progress = False
+        self.quote_refresh_finished.connect(self._on_quote_refresh_finished)
         
         # Setup UI
         t0 = perf_counter()
@@ -84,17 +90,36 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         central_widget.setObjectName("appRoot")
         self.setCentralWidget(central_widget)
-        
-        # Main layout
-        main_layout = QVBoxLayout()
-        central_widget.setLayout(main_layout)
-        
-        # Header
-        header = self.create_header()
-        main_layout.addWidget(header)
 
-        # Global KPI strip above sidebar/content shell
-        kpi_row = QHBoxLayout()
+        # App shell layout: fixed sidebar + right working surface.
+        root_layout = QHBoxLayout()
+        root_layout.setContentsMargins(10, 10, 10, 10)
+        root_layout.setSpacing(12)
+        central_widget.setLayout(root_layout)
+
+        self.sidebar = self.create_sidebar()
+        root_layout.addWidget(self.sidebar, 0)
+
+        self.main_surface = QWidget()
+        self.main_surface.setObjectName("mainSurface")
+        root_layout.addWidget(self.main_surface, 1)
+
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(2, 2, 2, 2)
+        main_layout.setSpacing(12)
+        self.main_surface.setLayout(main_layout)
+
+        # Top utility bar
+        self.top_bar = self.create_header()
+        main_layout.addWidget(self.top_bar)
+        self._set_header_meta()
+
+        # KPI strip
+        self.kpi_strip = QFrame()
+        self.kpi_strip.setObjectName("kpiStrip")
+        kpi_row = QHBoxLayout(self.kpi_strip)
+        kpi_row.setContentsMargins(10, 8, 10, 8)
+        kpi_row.setSpacing(10)
         self.global_daily_kpi = self._build_kpi_card("Daily Gain/Loss")
         self.global_weekly_kpi = self._build_kpi_card("Weekly Gain/Loss")
         self.global_total_kpi = self._build_kpi_card("Total Returns")
@@ -103,29 +128,32 @@ class MainWindow(QMainWindow):
         kpi_row.addWidget(self.global_weekly_kpi)
         kpi_row.addWidget(self.global_total_kpi)
         kpi_row.addWidget(self.global_realized_kpi)
-        main_layout.addLayout(kpi_row)
-
-        # Main shell: fixed sidebar + dynamic center content
-        shell = QHBoxLayout()
-        main_layout.addLayout(shell, 1)
-
-        self.sidebar = self.create_sidebar()
-        shell.addWidget(self.sidebar, 0)
+        main_layout.addWidget(self.kpi_strip)
 
         self.content_stack = QStackedWidget()
         self.content_stack.setObjectName("contentStack")
-        shell.addWidget(self.content_stack, 1)
+        main_layout.addWidget(self.content_stack, 1)
 
         # Create views
         self.dashboard_view = DashboardView(self.db, self.stock_service, self.ai_service, show_kpis=False)
-        self.portfolio_view = PortfolioView(self.db, self.stock_service)
+        self.journal_view = JournalView(self.db, self.ai_service)
         self.alerts_view = AlertsView(self.db, self.alert_service, self.ai_service, self.background_jobs)
         self.insights_view = InsightsView(self.db, self.alert_service, self.ai_service, self.background_jobs)
+        self.settings_view = self._build_placeholder_view(
+            title="Settings",
+            body="Profile settings and password change will be configured here."
+        )
+        self.help_view = self._build_placeholder_view(
+            title="Help",
+            body="Help map and onboarding resources will appear here."
+        )
 
         self.content_stack.addWidget(self.dashboard_view)
-        self.content_stack.addWidget(self.portfolio_view)
+        self.content_stack.addWidget(self.journal_view)
         self.content_stack.addWidget(self.alerts_view)
         self.content_stack.addWidget(self.insights_view)
+        self.content_stack.addWidget(self.settings_view)
+        self.content_stack.addWidget(self.help_view)
         self.show_view("dashboard")
         
         # Status bar
@@ -152,30 +180,135 @@ class MainWindow(QMainWindow):
         title_lbl.setObjectName("kpiTitle")
         value_lbl = QLabel("₹0.00")
         value_lbl.setObjectName("kpiValue")
-        sub_lbl = QLabel("0.00%")
-        sub_lbl.setObjectName("kpiSub")
         layout.addWidget(title_lbl)
         layout.addWidget(value_lbl)
-        layout.addWidget(sub_lbl)
         card.setLayout(layout)
         card._value = value_lbl
-        card._sub = sub_lbl
         return card
+
+    @staticmethod
+    def _build_placeholder_view(title: str, body: str) -> QWidget:
+        """Build a lightweight placeholder section for upcoming pages."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(8)
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("sectionTitle")
+        body_lbl = QLabel(body)
+        body_lbl.setObjectName("placeholderText")
+        body_lbl.setWordWrap(True)
+        layout.addWidget(title_lbl)
+        layout.addWidget(body_lbl)
+        layout.addStretch()
+        return page
+
+    def _quote_setting_key(self, user_id: int) -> str:
+        """App-settings key for persisted quote update timestamp."""
+        return f"user:{int(user_id)}:quotes_last_updated"
+
+    @staticmethod
+    def _parse_dt(value: str):
+        """Parse datetime from stored value."""
+        raw = (value or "").strip()
+        if not raw:
+            return None
+        for parser in (datetime.fromisoformat, lambda x: datetime.strptime(x, "%Y-%m-%d %H:%M:%S")):
+            try:
+                return parser(raw)
+            except Exception:
+                continue
+        return None
+
+    def _set_header_meta(self, dt: datetime = None):
+        """Render FY and last-updated text in top utility bar."""
+        current = datetime.now()
+        try:
+            fy_start, _fy_end, _fy_label = self.db.get_indian_financial_year_bounds(current.date())
+            fy_text = f"FY {fy_start.year}-{str(fy_start.year + 1)[-2:]}"
+        except Exception:
+            fy_text = "FY -"
+        if dt is None and self.current_user:
+            stored = self.db.get_setting(self._quote_setting_key(self.current_user["user_id"]))
+            dt = self._parse_dt(stored)
+        stamp = dt.strftime("%d %b %Y, %I:%M %p") if dt else "-"
+        self.header_meta_label.setText(f"{fy_text} · Last updated: {stamp}")
 
     def create_sidebar(self):
         """Create always-visible sidebar navigation."""
         panel = QFrame()
-        panel.setObjectName("navPanel")
-        panel.setMinimumWidth(190)
-        layout = QVBoxLayout()
-        panel.setLayout(layout)
+        panel.setObjectName("sidebarShell")
+        panel.setMinimumWidth(210)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        brand = QFrame()
+        brand.setObjectName("sidebarBrand")
+        brand_layout = QHBoxLayout(brand)
+        brand_layout.setContentsMargins(10, 10, 10, 10)
+        brand_layout.setSpacing(10)
+        self.sidebar_logo = QLabel()
+        self.sidebar_logo.setObjectName("brandLogo")
+        self.sidebar_logo.setAlignment(Qt.AlignCenter)
+        self.sidebar_logo.setFixedSize(30, 30)
+        brand_layout.addWidget(self.sidebar_logo)
+        brand_text = QVBoxLayout()
+        brand_text.setSpacing(0)
+        self.brand_title = QLabel("EquityJournal")
+        self.brand_title.setObjectName("brandTitle")
+        self.brand_subtitle = QLabel("PORTFOLIO DESK")
+        self.brand_subtitle.setObjectName("brandSubtitle")
+        brand_text.addWidget(self.brand_title)
+        brand_text.addWidget(self.brand_subtitle)
+        brand_layout.addLayout(brand_text)
+        layout.addWidget(brand)
+
+        account = QFrame()
+        account.setObjectName("accountCard")
+        account_layout = QVBoxLayout(account)
+        account_layout.setContentsMargins(10, 10, 10, 10)
+        account_layout.setSpacing(4)
+        tag = QLabel("ACCOUNT")
+        tag.setObjectName("accountTag")
+        self.sidebar_user_name = QLabel("Guest")
+        self.sidebar_user_name.setObjectName("accountName")
+        self.sidebar_user_meta = QLabel("Local mode")
+        self.sidebar_user_meta.setObjectName("accountMeta")
+        self.sidebar_total_deposit = QLabel("Deposit: ₹0.00")
+        self.sidebar_total_deposit.setObjectName("accountMeta")
+        self.deposit_edit_btn = QToolButton()
+        self.deposit_edit_btn.setObjectName("accountEditBtn")
+        self.deposit_edit_btn.setText("✎")
+        self.deposit_edit_btn.setToolTip("Edit deposit")
+        self.deposit_edit_btn.clicked.connect(self._edit_sidebar_deposit)
+        self.deposit_edit_btn.setEnabled(False)
+        self.sidebar_deployed = QLabel("Deployed: ₹0.00")
+        self.sidebar_deployed.setObjectName("accountMeta")
+        self.sidebar_available = QLabel("Available: ₹0.00")
+        self.sidebar_available.setObjectName("accountMeta")
+        account_layout.addWidget(tag)
+        account_layout.addWidget(self.sidebar_user_name)
+        account_layout.addWidget(self.sidebar_user_meta)
+
+        deposit_row = QHBoxLayout()
+        deposit_row.setContentsMargins(0, 0, 0, 0)
+        deposit_row.setSpacing(6)
+        deposit_row.addWidget(self.sidebar_total_deposit)
+        deposit_row.addWidget(self.deposit_edit_btn, 0, Qt.AlignRight)
+        account_layout.addLayout(deposit_row)
+        account_layout.addWidget(self.sidebar_deployed)
+        account_layout.addWidget(self.sidebar_available)
+        layout.addWidget(account)
 
         self.nav_buttons = {}
         entries = [
             ("dashboard", "Dashboard"),
-            ("portfolio", "Portfolio"),
+            ("journal", "Journal"),
             ("filings", "Filings"),
             ("insights", "Insights"),
+            ("settings", "Settings"),
+            ("help", "Help"),
         ]
         for key, label in entries:
             btn = QPushButton(label)
@@ -184,6 +317,12 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda _=False, k=key: self.show_view(k))
             layout.addWidget(btn)
             self.nav_buttons[key] = btn
+
+        self.new_trade_btn = QPushButton("◧  New Trade")
+        self.new_trade_btn.setObjectName("sideTradeBtn")
+        self.new_trade_btn.setFocusPolicy(Qt.NoFocus)
+        self.new_trade_btn.clicked.connect(self._open_add_transaction_from_sidebar)
+        layout.addWidget(self.new_trade_btn)
 
         layout.addStretch()
         self.logout_btn = QPushButton("Logout")
@@ -197,9 +336,11 @@ class MainWindow(QMainWindow):
         """Show the selected content view."""
         view_index = {
             "dashboard": 0,
-            "portfolio": 1,
+            "journal": 1,
             "filings": 2,
             "insights": 3,
+            "settings": 4,
+            "help": 5,
         }
         index = view_index.get(key, 0)
         self.content_stack.setCurrentIndex(index)
@@ -225,9 +366,23 @@ class MainWindow(QMainWindow):
         user_name = self.current_user.get("name", "User")
         self.logger.info("Logout requested for user_id=%s", self.current_user.get("user_id"))
         self.current_user = None
-        self.welcome_label.setText("Welcome!")
+        self.header_meta_label.setText("FY - · Last updated: -")
+        self.sidebar_user_name.setText("Guest")
+        self.sidebar_user_meta.setText("Local mode")
+        self.sidebar_total_deposit.setText("Deposit: ₹0.00")
+        self.sidebar_deployed.setText("Deployed: ₹0.00")
+        self.sidebar_available.setText("Available: ₹0.00")
+        self.deposit_edit_btn.setEnabled(False)
         if self.show_login(hide_main=True):
             self.status_bar.showMessage(f"Logged out: {user_name}", 2500)
+
+    def _open_add_transaction_from_sidebar(self):
+        """Open add transaction flow from sidebar quick action."""
+        if not self.current_user:
+            QMessageBox.information(self, "New Trade", "Login required.")
+            return
+        self.show_view("dashboard")
+        self.dashboard_view.add_transaction()
     
     def create_menu_bar(self):
         """Create menu bar"""
@@ -252,47 +407,21 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
 
-        # View menu
-        view_menu = menubar.addMenu('&View')
-        toggle_theme_action = QAction('Toggle &Dark Theme', self)
-        toggle_theme_action.setShortcut('Ctrl+T')
-        toggle_theme_action.triggered.connect(self.toggle_theme)
-        view_menu.addAction(toggle_theme_action)
+        # View menu intentionally omitted while app is dark-theme only.
     
     def create_header(self):
         """Create header with welcome message and actions"""
-        header = QWidget()
-        layout = QHBoxLayout()
-        header.setLayout(layout)
+        header = QFrame()
+        header.setObjectName("topUtilityBar")
+        layout = QHBoxLayout(header)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(10)
 
-        self.logo_label = QLabel()
-        self.logo_label.setFixedSize(30, 30)
-        layout.addWidget(self.logo_label)
+        self.header_meta_label = QLabel("FY - · Last updated: -")
+        self.header_meta_label.setObjectName("topBarMeta")
+        layout.addWidget(self.header_meta_label)
 
-        # Welcome message
-        self.welcome_label = QLabel("Welcome!")
-        welcome_font = QFont()
-        welcome_font.setPointSize(14)
-        welcome_font.setBold(True)
-        self.welcome_label.setFont(welcome_font)
-        layout.addWidget(self.welcome_label)
-        
         layout.addStretch()
-        
-        self.theme_label = QLabel("Dark Theme")
-        self.theme_label.setObjectName("themeLabel")
-        layout.addWidget(self.theme_label)
-
-        self.theme_toggle = QSlider(Qt.Horizontal)
-        self.theme_toggle.setRange(0, 1)
-        self.theme_toggle.setPageStep(1)
-        self.theme_toggle.setSingleStep(1)
-        self.theme_toggle.setFixedWidth(58)
-        self.theme_toggle.setFixedHeight(30)
-        self.theme_toggle.setObjectName("themeToggle")
-        self.theme_toggle.valueChanged.connect(self.toggle_theme)
-        self.theme_toggle.setValue(1)
-        layout.addWidget(self.theme_toggle)
 
         self.notif_bell_btn = QPushButton("🔔")
         self.notif_bell_btn.setObjectName("actionBlendBtn")
@@ -307,19 +436,20 @@ class MainWindow(QMainWindow):
         
         # AI status indicator
         self.ai_status_label = QLabel()
+        self.ai_status_label.setObjectName("aiStatus")
         self.update_ai_status()
         layout.addWidget(self.ai_status_label)
-        
+
         return header
-    
+
     def update_ai_status(self):
         """Update AI status indicator"""
         if self.ai_service.is_available():
-            self.ai_status_label.setText(f"🤖 AI: {self.ai_service.provider.upper()}")
-            self.ai_status_label.setStyleSheet("color: #4CAF50; padding: 8px;")
+            self.ai_status_label.setText(f"AI: {self.ai_service.provider.upper()}")
+            self.ai_status_label.setStyleSheet("color: #4ADE80; padding: 4px 8px;")
         else:
-            self.ai_status_label.setText("🤖 AI: Not configured")
-            self.ai_status_label.setStyleSheet("color: #999; padding: 8px;")
+            self.ai_status_label.setText("AI: OFF")
+            self.ai_status_label.setStyleSheet("color: #8B98A7; padding: 4px 8px;")
     
     def show_login(self, hide_main: bool = False):
         """Show login dialog"""
@@ -345,7 +475,11 @@ class MainWindow(QMainWindow):
     def on_login_success(self, user_data):
         """Handle successful login"""
         self.current_user = user_data
-        self.welcome_label.setText(f"Welcome, {user_data['name']}! 👋")
+        self._set_header_meta()
+        self.sidebar_user_name.setText(user_data.get("name", "User"))
+        self.sidebar_user_meta.setText(user_data.get("mobile_number", "N/A"))
+        self.deposit_edit_btn.setEnabled(True)
+        self._refresh_sidebar_cash_summary(user_data.get("user_id"))
         self.logger.info("Login successful for user_id=%s", user_data.get("user_id"))
         self.status_bar.showMessage(f"Logged in as {user_data['name']}", 3000)
         if config.WATCHMAN_MATERIAL_SCAN_ON_LOGIN:
@@ -360,7 +494,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(1800, self._run_daily_watchman_if_due)
 
     def _schedule_post_login_refresh(self):
-        """Run a fast refresh first, then a live-price refresh after UI is visible."""
+        """Run a fast DB-backed refresh, then async live quote refresh."""
         if not self.current_user:
             return
         QTimer.singleShot(50, lambda: self.refresh_all(
@@ -368,12 +502,96 @@ class MainWindow(QMainWindow):
             use_live_quotes=False,
             reason="startup-fast"
         ))
-        QTimer.singleShot(900, lambda: self.refresh_all(
-            sync_announcements=False,
-            use_live_quotes=True,
-            reason="startup-live"
-        ))
+        if config.QUOTE_REFRESH_ASYNC_ON_LOGIN:
+            QTimer.singleShot(
+                max(200, config.QUOTE_REFRESH_START_DELAY_MS),
+                lambda: self.start_background_quote_refresh(reason="startup-live")
+            )
         self.start_notification_polling()
+
+    def start_background_quote_refresh(self, reason: str = "manual-live"):
+        """Fetch live quotes off UI thread and persist latest prices."""
+        if not self.current_user:
+            return
+        if self._quote_refresh_in_progress:
+            self.logger.info("Quote refresh skipped (%s): already in progress", reason)
+            return
+
+        user_id = int(self.current_user["user_id"])
+        self._quote_refresh_in_progress = True
+        thread = threading.Thread(
+            target=self._background_quote_refresh_worker,
+            args=(user_id, reason),
+            daemon=True,
+            name=f"quote-refresh-{user_id}"
+        )
+        thread.start()
+
+    def _background_quote_refresh_worker(self, user_id: int, reason: str):
+        """Worker: fetch latest prices and persist to DB without blocking UI."""
+        t0 = perf_counter()
+        updated = 0
+        now_iso = datetime.now().isoformat(timespec="seconds")
+        try:
+            portfolio = self.db.get_portfolio_summary(user_id)
+            jobs = []
+            for row in portfolio:
+                symbol = row.get("symbol")
+                exchange = row.get("exchange")
+                stock_id = row.get("stock_id")
+                if not symbol or not stock_id:
+                    continue
+                quote_symbol = self.stock_service.to_quote_symbol(symbol, exchange=exchange)
+                jobs.append((int(stock_id), quote_symbol))
+
+            if jobs:
+                max_workers = max(1, min(config.QUOTE_REFRESH_MAX_WORKERS, len(jobs)))
+                with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="quote-live") as pool:
+                    future_to_stock = {
+                        pool.submit(self.stock_service.get_current_price, quote_symbol): stock_id
+                        for stock_id, quote_symbol in jobs
+                    }
+                    for future in as_completed(future_to_stock):
+                        stock_id = future_to_stock[future]
+                        try:
+                            live = future.result()
+                        except Exception as exc:
+                            self.logger.debug("Live quote fetch failed for stock_id=%s: %s", stock_id, exc)
+                            continue
+                        if live is None:
+                            continue
+                        self.db.save_price(stock_id, float(live))
+                        updated += 1
+            if updated > 0:
+                self.db.set_setting(self._quote_setting_key(user_id), now_iso)
+        except Exception as exc:
+            self.logger.error("Background quote refresh failed (%s): %s", reason, exc)
+        finally:
+            elapsed = perf_counter() - t0
+            self.quote_refresh_finished.emit(user_id, updated, reason, elapsed, now_iso)
+
+    def _on_quote_refresh_finished(self, user_id: int, updated_count: int, reason: str, elapsed: float, done_iso: str):
+        """Apply UI refresh after async quote sync completes."""
+        self._quote_refresh_in_progress = False
+        self.logger.info(
+            "Background quote refresh complete (%s): updated=%s in %.2fs",
+            reason, updated_count, elapsed
+        )
+        if not self.current_user or int(self.current_user.get("user_id") or 0) != int(user_id):
+            return
+
+        done_dt = self._parse_dt(done_iso)
+        if updated_count > 0:
+            self._set_header_meta(done_dt)
+            self.status_bar.showMessage("Live quotes updated", 2500)
+            self.refresh_all(
+                sync_announcements=False,
+                use_live_quotes=False,
+                reason=f"{reason}-apply",
+                run_price_target_checks=True
+            )
+        else:
+            self.status_bar.showMessage("Live quote update skipped (no changes)", 2500)
 
     def _run_daily_watchman_if_due(self):
         """Trigger daily quarter-insight generation on first login of day."""
@@ -394,7 +612,13 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.logger.error("Daily watchman run failed: %s", exc)
     
-    def refresh_all(self, sync_announcements: bool = False, use_live_quotes: bool = True, reason: str = "manual"):
+    def refresh_all(
+        self,
+        sync_announcements: bool = False,
+        use_live_quotes: bool = True,
+        reason: str = "manual",
+        run_price_target_checks: bool = None
+    ):
         """Refresh all data"""
         if not self.current_user:
             return
@@ -419,8 +643,8 @@ class MainWindow(QMainWindow):
             self.logger.info("Refresh (%s): dashboard in %.2fs", reason, perf_counter() - t0)
 
             t0 = perf_counter()
-            self.portfolio_view.load_portfolio(self.current_user['user_id'], use_live_quotes=use_live_quotes)
-            self.logger.info("Refresh (%s): portfolio in %.2fs", reason, perf_counter() - t0)
+            self.journal_view.load_for_user(self.current_user['user_id'])
+            self.logger.info("Refresh (%s): journal in %.2fs", reason, perf_counter() - t0)
 
             t0 = perf_counter()
             self.alerts_view.load_alerts(self.current_user['user_id'], sync_announcements=sync_announcements)
@@ -430,14 +654,30 @@ class MainWindow(QMainWindow):
             self.insights_view.load_for_user(self.current_user['user_id'])
             self.logger.info("Refresh (%s): insights in %.2fs", reason, perf_counter() - t0)
 
-            t0 = perf_counter()
-            triggered = self.alert_service.check_price_targets(self.current_user['user_id'])
-            self.logger.info("Refresh (%s): price-target checks in %.2fs", reason, perf_counter() - t0)
+            if run_price_target_checks is None:
+                run_price_target_checks = bool(use_live_quotes)
+            triggered = []
+            if run_price_target_checks:
+                t0 = perf_counter()
+                triggered = self.alert_service.check_price_targets(
+                    self.current_user['user_id'],
+                    use_live_quotes=use_live_quotes
+                )
+                self.logger.info("Refresh (%s): price-target checks in %.2fs", reason, perf_counter() - t0)
+            else:
+                self.logger.info("Refresh (%s): price-target checks skipped", reason)
 
             if triggered:
                 self.alerts_view.load_alerts(self.current_user['user_id'], sync_announcements=False)
                 self.insights_view.load_for_user(self.current_user['user_id'])
 
+            if use_live_quotes:
+                self.db.set_setting(
+                    self._quote_setting_key(self.current_user["user_id"]),
+                    datetime.now().isoformat(timespec="seconds")
+                )
+            self._refresh_sidebar_cash_summary(self.current_user["user_id"])
+            self._set_header_meta()
             self.status_bar.showMessage("Refreshed successfully", 3000)
             elapsed = perf_counter() - overall_t0
             self.logger.info("Refresh completed (%s) in %.2fs", reason, elapsed)
@@ -461,6 +701,7 @@ class MainWindow(QMainWindow):
         total_current = 0.0
         total_daily = 0.0
         total_weekly = 0.0
+        series_all = self.db.get_portfolio_performance_series(user_id=user_id)
         for row in portfolio:
             symbol = row["symbol"]
             exchange = row.get("exchange")
@@ -472,36 +713,159 @@ class MainWindow(QMainWindow):
                 current = self.stock_service.get_current_price(qsym) or current
             total_invested += avg * qty
             total_current += current * qty
+        daily_pct = 0.0
+        weekly_pct = 0.0
+        if use_live_quotes:
+            period_end_dt = datetime.now().date()
+            end_holdings_value = float(total_current)
+        elif series_all:
+            period_end_dt = datetime.strptime(series_all[-1]["trade_date"], "%Y-%m-%d").date()
+            end_holdings_value = float(series_all[-1]["portfolio_value"] or 0.0)
+        else:
+            period_end_dt = datetime.now().date()
+            end_holdings_value = float(total_current)
 
-            if use_live_quotes:
-                info = self.stock_service.get_stock_info(qsym) or {}
-                prev_close = info.get("previous_close") or info.get("current_price")
-                try:
-                    prev_close = float(prev_close)
-                except Exception:
-                    prev_close = None
-                if prev_close is not None:
-                    total_daily += (current - prev_close) * qty
+        daily_start = (period_end_dt - timedelta(days=1)).isoformat()
+        weekly_start = (period_end_dt - timedelta(days=7)).isoformat()
+        period_end = period_end_dt.isoformat()
 
-                history = self.stock_service.get_historical_prices(qsym, period="5d")
-                if history and history.get("prices"):
-                    try:
-                        base = float(history["prices"][0])
-                        total_weekly += (current - base) * qty
-                    except Exception:
-                        pass
+        total_daily, daily_pct = self._compute_period_gain(
+            user_id=user_id,
+            series=series_all,
+            end_holdings_value=end_holdings_value,
+            start_date=daily_start,
+            end_date=period_end
+        )
+        total_weekly, weekly_pct = self._compute_period_gain(
+            user_id=user_id,
+            series=series_all,
+            end_holdings_value=end_holdings_value,
+            start_date=weekly_start,
+            end_date=period_end
+        )
         total_returns = total_current - total_invested
-        daily_pct = (total_daily / total_current * 100) if total_current else 0.0
-        weekly_pct = (total_weekly / total_current * 100) if total_current else 0.0
         total_pct = (total_returns / total_invested * 100) if total_invested else 0.0
         self._set_kpi_value(self.global_daily_kpi, total_daily, daily_pct)
         self._set_kpi_value(self.global_weekly_kpi, total_weekly, weekly_pct)
         self._set_kpi_value(self.global_total_kpi, total_returns, total_pct)
         realized = self.db.get_realized_pnl_summary(user_id)
         realized_value = float(realized.get("total_realized_pnl") or 0.0)
-        self._set_kpi_value(self.global_realized_kpi, realized_value, 0.0)
-        self.global_realized_kpi._sub.setText(realized.get("fy_label", "Current FY"))
-        self.global_realized_kpi._sub.setStyleSheet("color: #9FB0C4;")
+        realized_color = "#4ADE80" if realized_value >= 0 else "#FB7185"
+        fy_label = realized.get("fy_label", "Current FY")
+        self.global_realized_kpi._value.setText(f"₹{realized_value:,.2f}  ({fy_label})")
+        self.global_realized_kpi._value.setStyleSheet(f"color: {realized_color};")
+
+    def _compute_period_gain(
+        self,
+        user_id: int,
+        series: list,
+        end_holdings_value: float,
+        start_date: str,
+        end_date: str
+    ) -> tuple:
+        """
+        Compute period gain using:
+            gain = v_end - v_start - net_contribution
+
+        where:
+            net_contribution = sum(BUY amounts) - sum(SELL proceeds)
+
+        This isolates market/price performance from internal capital movement
+        across holdings within the selected period.
+        """
+        start_value = float(self.db.get_portfolio_value_as_of(user_id, start_date))
+        end_value = float(self.db.get_portfolio_value_as_of(user_id, end_date))
+
+        # Fallback to caller-provided end holdings if date-as-of valuation is unavailable.
+        if end_value <= 0 and float(end_holdings_value or 0.0) > 0:
+            end_value = float(end_holdings_value)
+
+        # Legacy fallback for start_value only when valuation service returns zero.
+        if start_value <= 0:
+            start_value = float(self._series_value_on_or_before(series, start_date))
+
+        net_contribution = self.db.get_portfolio_net_transaction_cash_flow(user_id, start_date, end_date)
+        gain_value = end_value - start_value - float(net_contribution)
+        denominator = start_value + float(net_contribution)
+        gain_pct = (gain_value / denominator * 100.0) if abs(denominator) > 1e-9 else 0.0
+        return gain_value, gain_pct
+
+    def _refresh_sidebar_cash_summary(self, user_id: int = None):
+        """Update sidebar capital snapshot.
+
+        Rules:
+        - `Deposit` is user-editable and persisted in app settings.
+        - `Deployed` is current holdings buy value (sum of quantity * avg_price).
+        - `Available` is Deposit - Deployed.
+        """
+        uid = int(user_id or 0)
+        if uid <= 0:
+            return
+        try:
+            deposit = self._get_user_deposit_capital(uid)
+            portfolio = self.db.get_portfolio_summary(uid)
+            deployed = sum(float(row.get("quantity") or 0.0) * float(row.get("avg_price") or 0.0) for row in portfolio)
+            available = deposit - deployed
+            self.sidebar_total_deposit.setText(f"Deposit: ₹{deposit:,.2f}")
+            self.sidebar_deployed.setText(f"Deployed: ₹{deployed:,.2f}")
+            self.sidebar_available.setText(f"Available: ₹{available:,.2f}")
+        except Exception:
+            self.sidebar_total_deposit.setText("Deposit: ₹0.00")
+            self.sidebar_deployed.setText("Deployed: ₹0.00")
+            self.sidebar_available.setText("Available: ₹0.00")
+
+    @staticmethod
+    def _deposit_setting_key(user_id: int) -> str:
+        """App-settings key for user-level editable deposit amount."""
+        return f"user:{int(user_id)}:capital_deposit"
+
+    def _get_user_deposit_capital(self, user_id: int) -> float:
+        """Get user deposit from settings; initialize once from config default."""
+        key = self._deposit_setting_key(user_id)
+        stored = (self.db.get_setting(key, "") or "").strip()
+        if stored:
+            try:
+                return float(stored)
+            except Exception:
+                pass
+        default_deposit = float(config.LEDGER_INITIAL_CREDIT or 0.0)
+        self.db.set_setting(key, f"{default_deposit:.2f}")
+        return default_deposit
+
+    def _save_user_deposit_capital(self, user_id: int, amount: float):
+        """Persist user deposit amount in app settings."""
+        self.db.set_setting(self._deposit_setting_key(user_id), f"{float(amount):.2f}")
+
+    def _edit_sidebar_deposit(self):
+        """Open editable deposit dialog and refresh sidebar snapshot."""
+        if not self.current_user:
+            return
+        user_id = int(self.current_user.get("user_id") or 0)
+        if user_id <= 0:
+            return
+        current_amount = self._get_user_deposit_capital(user_id)
+        amount, ok = QInputDialog.getDouble(
+            self,
+            "Edit Deposit",
+            "Deposit amount (₹):",
+            current_amount,
+            0.0,
+            9999999999.0,
+            2
+        )
+        if not ok:
+            return
+        self._save_user_deposit_capital(user_id, float(amount))
+        self._refresh_sidebar_cash_summary(user_id)
+        self.status_bar.showMessage("Deposit updated", 2000)
+
+    @staticmethod
+    def _series_value_on_or_before(series: list, target_date: str) -> float:
+        """Pick portfolio value at the latest trade_date <= target_date."""
+        for row in reversed(series or []):
+            if (row.get("trade_date") or "") <= target_date:
+                return float(row.get("portfolio_value") or 0.0)
+        return 0.0
 
     @staticmethod
     def _set_kpi_value(card: QFrame, value: float, pct: float):
@@ -516,10 +880,8 @@ class MainWindow(QMainWindow):
             Any: Method output for caller use.
         """
         color = "#4ADE80" if value >= 0 else "#FB7185"
-        card._value.setText(f"₹{value:,.2f}")
+        card._value.setText(f"₹{value:,.2f}  ({pct:+.2f}%)")
         card._value.setStyleSheet(f"color: {color};")
-        card._sub.setText(f"{pct:+.2f}%")
-        card._sub.setStyleSheet(f"color: {color};")
 
     def _apply_depth_effects(self):
         """Apply depth effects.
@@ -532,6 +894,8 @@ class MainWindow(QMainWindow):
         """
         preset = self._shadow_preset()
         self._apply_shadow(self.sidebar, blur=preset["panel_blur"], y_offset=preset["panel_offset"], alpha=preset["panel_alpha"])
+        self._apply_shadow(self.top_bar, blur=preset["panel_blur"], y_offset=preset["panel_offset"], alpha=preset["panel_alpha"])
+        self._apply_shadow(self.kpi_strip, blur=preset["panel_blur"], y_offset=preset["panel_offset"], alpha=preset["panel_alpha"])
         self._apply_shadow(
             self.content_stack,
             blur=preset["content_blur"],
@@ -614,7 +978,8 @@ class MainWindow(QMainWindow):
     def auto_refresh(self):
         """Auto-refresh data periodically"""
         if self.current_user:
-            self.refresh_all(sync_announcements=False, use_live_quotes=True, reason="auto-refresh")
+            self.refresh_all(sync_announcements=False, use_live_quotes=False, reason="auto-refresh-db")
+            self.start_background_quote_refresh(reason="auto-refresh-live")
     
     def show_about(self):
         """Show about dialog"""
@@ -682,32 +1047,60 @@ class MainWindow(QMainWindow):
         """
         if not self.current_user:
             return
-        notifications = self.db.get_user_notifications(self.current_user["user_id"], unread_only=False, limit=100)
+        notifications = self.db.get_user_notifications(self.current_user["user_id"], unread_only=True, limit=100)
         dialog = QDialog(self)
         dialog.setWindowTitle("Notifications")
-        dialog.resize(640, 420)
+        dialog.resize(760, 520)
         self._apply_active_theme(dialog)
+        dialog.setStyleSheet(
+            """
+            QFrame#notifCard {
+                border: 1px solid rgba(96, 165, 250, 0.28);
+                border-radius: 12px;
+                background: rgba(13, 28, 44, 0.82);
+            }
+            QLabel#notifTitle {
+                color: #CFE5FF;
+                font-weight: 700;
+                font-size: 13px;
+            }
+            QLabel#notifTime {
+                color: #87A9CE;
+                font-size: 11px;
+            }
+            QLabel#notifDesc {
+                color: #E2ECF8;
+                font-size: 13px;
+            }
+            """
+        )
         layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        info = QLabel("Unread notifications")
+        info.setObjectName("sectionTitle")
+        layout.addWidget(info)
+
         list_widget = QListWidget()
-        notice = QLabel("Tip: Double-click a notification to open filing link (if available).")
-        layout.addWidget(notice)
-        row_map = []
-        for n in notifications:
-            prefix = "● " if not n.get("is_read") else ""
-            item = QListWidgetItem(
-                f"{prefix}{n.get('created_at')} | {n.get('title')}\n{n.get('message')}"
-            )
-            if not n.get("is_read"):
-                item.setForeground(self.palette().highlight())
-            list_widget.addItem(item)
-            row_map.append(n)
-        list_widget.itemDoubleClicked.connect(lambda item, rows=row_map, lw=list_widget: self._open_notification_link(item, rows, lw))
-        layout.addWidget(list_widget)
+        list_widget.setSpacing(10)
+        list_widget.setSelectionMode(QAbstractItemView.NoSelection)
+        list_widget.setFocusPolicy(Qt.NoFocus)
+
+        if not notifications:
+            empty = QLabel("No unread notifications.")
+            empty.setObjectName("placeholderText")
+            layout.addWidget(empty)
+        else:
+            for n in notifications:
+                item = QListWidgetItem()
+                card = self._build_notification_card(n, dialog)
+                item.setSizeHint(card.sizeHint())
+                list_widget.addItem(item)
+                list_widget.setItemWidget(item, card)
+            layout.addWidget(list_widget)
 
         btn_row = QHBoxLayout()
-        open_btn = QPushButton("Open Link")
-        open_btn.clicked.connect(lambda: self._open_selected_notification_link(row_map, list_widget))
-        btn_row.addWidget(open_btn)
         mark_read_btn = QPushButton("Mark All Read")
         mark_read_btn.clicked.connect(lambda: self._mark_all_notifications_read(dialog))
         btn_row.addWidget(mark_read_btn)
@@ -718,23 +1111,98 @@ class MainWindow(QMainWindow):
         layout.addLayout(btn_row)
         dialog.exec_()
 
-    def _open_notification_link(self, item: QListWidgetItem, rows: list, list_widget: QListWidget):
-        """Open detail URL from notification metadata when user double-clicks list row."""
-        row = list_widget.row(item)
-        if row < 0 or row >= len(rows):
-            return
-        if not self._open_notification_urls(rows[row]):
+    def _build_notification_card(self, notification: dict, parent: QWidget) -> QFrame:
+        """Build one bordered notification card with compact description and links."""
+        card = QFrame(parent)
+        card.setObjectName("notifCard")
+        root = QVBoxLayout(card)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        title = QLabel(notification.get("title") or "Notification")
+        title.setObjectName("notifTitle")
+        title.setWordWrap(True)
+        header.addWidget(title, 1)
+        ts = QLabel(notification.get("created_at") or "")
+        ts.setObjectName("notifTime")
+        header.addWidget(ts, 0, Qt.AlignRight | Qt.AlignTop)
+        root.addLayout(header)
+
+        desc = QLabel(self._notification_compact_description(notification, max_words=10))
+        desc.setObjectName("notifDesc")
+        desc.setWordWrap(True)
+        root.addWidget(desc)
+
+        primary_url, alternate_url = self._resolve_notification_links(notification)
+        links_row = QHBoxLayout()
+        links_row.setSpacing(8)
+
+        primary_btn = QPushButton("Open")
+        primary_btn.setEnabled(bool(primary_url))
+        primary_btn.clicked.connect(lambda _=False, u=primary_url: self._open_direct_url(u))
+        links_row.addWidget(primary_btn)
+
+        alternate_btn = QPushButton("Alternate Link")
+        alternate_btn.setEnabled(bool(alternate_url))
+        alternate_btn.clicked.connect(lambda _=False, u=alternate_url: self._open_direct_url(u))
+        links_row.addWidget(alternate_btn)
+
+        links_row.addStretch()
+        root.addLayout(links_row)
+        return card
+
+    @staticmethod
+    def _notification_compact_description(notification: dict, max_words: int = 10) -> str:
+        """Return meaningful compact description limited to max_words words."""
+        message = (notification.get("message") or "").strip()
+        lines = [ln.strip() for ln in message.splitlines() if ln.strip()]
+        candidate = ""
+        for line in lines:
+            lower = line.lower()
+            if lower.startswith("company:") or lower.startswith("details:") or lower.startswith("alternate:"):
+                continue
+            if "summary:" in lower:
+                _, _, rhs = line.partition(":")
+                candidate = rhs.strip()
+                break
+            candidate = line
+            break
+        if not candidate:
+            candidate = (notification.get("title") or "Notification").strip()
+        candidate = re.sub(r"https?://\S+", "", candidate).strip()
+        words = [w for w in re.sub(r"\s+", " ", candidate).split(" ") if w]
+        if len(words) <= max_words:
+            return " ".join(words)
+        return f"{' '.join(words[:max_words])}..."
+
+    def _resolve_notification_links(self, notification: dict) -> tuple:
+        """Resolve primary and alternate links from metadata/message."""
+        metadata = notification.get("metadata") or {}
+        primary = self._normalize_possible_filing_url((metadata.get("detail_url") or "").strip())
+        alternate = self._normalize_possible_filing_url((metadata.get("alternate_url") or "").strip())
+
+        for raw in self._extract_notification_url_candidates(notification):
+            normalized = self._normalize_possible_filing_url(raw)
+            if not normalized:
+                continue
+            if not primary:
+                primary = normalized
+                continue
+            if not alternate and normalized != primary:
+                alternate = normalized
+                break
+        return primary, alternate
+
+    def _open_direct_url(self, url: str):
+        """Open url in browser; show friendly message when unavailable."""
+        norm = self._normalize_possible_filing_url(url)
+        if not norm:
             QMessageBox.information(self, "No Link", "No valid filing URL found for this notification.")
             return
-
-    def _open_selected_notification_link(self, rows: list, list_widget: QListWidget):
-        """Open link for currently selected notification row."""
-        row = list_widget.currentRow()
-        if row < 0 or row >= len(rows):
-            QMessageBox.information(self, "Select Notification", "Select a notification first.")
-            return
-        if not self._open_notification_urls(rows[row]):
-            QMessageBox.information(self, "No Link", "No valid filing URL found for selected notification.")
+        if not QDesktopServices.openUrl(QUrl(norm)):
+            QMessageBox.warning(self, "Open Failed", "Unable to open link in browser.")
 
     def _open_notification_urls(self, notification: dict) -> bool:
         """Try opening primary/alternate URL candidates from notification metadata/message."""
@@ -806,11 +1274,11 @@ class MainWindow(QMainWindow):
         text = """
         <h3>Quick Start Checklist</h3>
         <ol>
-            <li>Add transactions from <b>Portfolio</b> with setup/confidence and notes.</li>
+            <li>Add transactions from <b>Dashboard</b> with setup/confidence and notes.</li>
             <li>Open <b>Filings</b> and click <b>Sync Filings</b> to ingest latest announcements.</li>
             <li>Use <b>Insights</b> to review quarter summaries for Results and Earnings Call.</li>
-            <li>Review <b>Journal Notes</b> in Dashboard and update reflections regularly.</li>
-            <li>Use dark/light toggle; default mode is <b>Dark Theme</b>.</li>
+            <li>Review <b>Journal</b> notes and update reflections regularly.</li>
+            <li>App uses a consistent <b>Dark Theme</b> across all screens and popups.</li>
         </ol>
         """
         QMessageBox.information(self, "Onboarding Checklist", text)
@@ -818,7 +1286,8 @@ class MainWindow(QMainWindow):
 
     def apply_theme(self):
         """Load and apply app stylesheet from assets folder."""
-        css_name = "theme_dark.qss" if self.current_theme == "dark" else "theme_light.qss"
+        self.current_theme = "dark"
+        css_name = "theme_dark.qss"
         css_path = Path(__file__).resolve().parent.parent / "assets" / "css" / css_name
         css = ""
         if css_path.exists():
@@ -828,31 +1297,6 @@ class MainWindow(QMainWindow):
             app.setStyleSheet(css)
         self.setStyleSheet(css)
         self._apply_branding_for_theme()
-        is_dark = self.current_theme == "dark"
-        self.theme_label.setText("Dark Theme")
-        current_val = self.theme_toggle.value()
-        target_val = 1 if is_dark else 0
-        if current_val != target_val:
-            self.theme_toggle.blockSignals(True)
-            self.theme_toggle.setValue(target_val)
-            self.theme_toggle.blockSignals(False)
-
-    def toggle_theme(self, checked=False):
-        """Toggle theme.
-
-        Args:
-            checked: Input parameter.
-
-        Returns:
-            Any: Method output for caller use.
-        """
-        if isinstance(checked, bool):
-            self.current_theme = "dark" if checked else "light"
-        elif isinstance(checked, int):
-            self.current_theme = "dark" if checked == 1 else "light"
-        else:
-            self.current_theme = "dark" if self.current_theme == "light" else "light"
-        self.apply_theme()
 
     def _apply_branding_for_theme(self):
         """Apply branding for theme.
@@ -865,11 +1309,12 @@ class MainWindow(QMainWindow):
         """
         logo_path = self._logo_file_for_theme()
         if logo_path.exists():
-            pixmap = QPixmap(str(logo_path)).scaled(26, 26, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.logo_label.setPixmap(pixmap)
+            pixmap = QPixmap(str(logo_path)).scaled(28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            if hasattr(self, "sidebar_logo"):
+                self.sidebar_logo.setPixmap(pixmap)
             self.setWindowIcon(QIcon(str(logo_path)))
-        else:
-            self.logo_label.clear()
+        elif hasattr(self, "sidebar_logo"):
+            self.sidebar_logo.clear()
 
     def _apply_active_theme(self, widget: QWidget):
         """Apply active theme.
@@ -892,11 +1337,7 @@ class MainWindow(QMainWindow):
             Any: Method output for caller use.
         """
         images_dir = Path(__file__).resolve().parent.parent / "assets" / "images"
-        candidates = (
-            ["equityjournal_logo_dark.png", "logo_dark_theme.png"]
-            if self.current_theme == "dark"
-            else ["equityjournal_logo_light.png", "logo_light_theme.png"]
-        )
+        candidates = ["equityjournal_logo_dark.png", "logo_dark_theme.png"]
         for name in candidates:
             path = images_dir / name
             if path.exists():

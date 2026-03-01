@@ -85,6 +85,10 @@ class Config:
         self.SHOW_ONBOARDING_HELP = os.getenv('SHOW_ONBOARDING_HELP', 'true').lower() == 'true'
         self.NOTIFICATION_POLL_INTERVAL_SEC = int(os.getenv('NOTIFICATION_POLL_INTERVAL_SEC', '8'))
         self.WATCHMAN_MATERIAL_SCAN_ON_LOGIN = os.getenv('WATCHMAN_MATERIAL_SCAN_ON_LOGIN', 'true').lower() == 'true'
+        self.QUOTE_REFRESH_ASYNC_ON_LOGIN = os.getenv('QUOTE_REFRESH_ASYNC_ON_LOGIN', 'true').lower() == 'true'
+        self.QUOTE_REFRESH_START_DELAY_MS = int(os.getenv('QUOTE_REFRESH_START_DELAY_MS', '1200'))
+        self.QUOTE_REFRESH_MAX_WORKERS = int(os.getenv('QUOTE_REFRESH_MAX_WORKERS', '4'))
+        self.LEDGER_INITIAL_CREDIT = float(os.getenv('LEDGER_INITIAL_CREDIT', '1800000'))
     
     def is_ai_enabled(self):
         """Check if AI features are configured"""

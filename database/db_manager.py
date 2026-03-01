@@ -8,6 +8,7 @@ import json
 from datetime import datetime, date
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+from utils.config import config
 
 class DatabaseManager:
     """Manages database operations"""
@@ -30,6 +31,7 @@ class DatabaseManager:
             # This ensures all operations access the same schema/data in tests.
             self._shared_conn = sqlite3.connect(self.db_path)
             self._create_schema(self._shared_conn)
+            self._run_migrations()
         else:
             self._ensure_database_exists()
     
@@ -64,6 +66,10 @@ class DatabaseManager:
         # Add quote symbol mapping column for Yahoo-compatible tickers.
         if has_column("symbol_master", "quote_symbol_yahoo") is False:
             cursor.execute("ALTER TABLE symbol_master ADD COLUMN quote_symbol_yahoo TEXT")
+        if has_column("symbol_master", "industry_group") is False:
+            cursor.execute("ALTER TABLE symbol_master ADD COLUMN industry_group TEXT")
+        if has_column("symbol_master", "industry") is False:
+            cursor.execute("ALTER TABLE symbol_master ADD COLUMN industry TEXT")
 
         # Shared settings store for sync cursors and feature flags.
         cursor.execute("""
@@ -92,6 +98,24 @@ class DatabaseManager:
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_bse_daily_prices_code_date ON bse_daily_prices(bse_code, trade_date)")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cash_ledger (
+                ledger_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                entry_type TEXT NOT NULL,
+                amount REAL NOT NULL,
+                entry_date DATE,
+                note TEXT,
+                reference_transaction_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id),
+                FOREIGN KEY (reference_transaction_id) REFERENCES transactions(transaction_id)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_cash_ledger_user_date
+            ON cash_ledger(user_id, entry_date, ledger_id)
+        """)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS insight_snapshots (
                 snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -252,6 +276,22 @@ class DatabaseManager:
             CREATE INDEX IF NOT EXISTS idx_notifications_user_read
             ON notifications(user_id, is_read, created_at)
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notification_dedupe_keys (
+                dedupe_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_scope TEXT NOT NULL,
+                user_id INTEGER,
+                notif_type TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                notification_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_scope, notif_type, dedupe_key)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_notification_dedupe_scope
+            ON notification_dedupe_keys(user_scope, notif_type, created_at)
+        """)
 
         conn.commit()
         self._close_connection(conn)
@@ -398,7 +438,7 @@ class DatabaseManager:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT s.stock_id, s.symbol, s.company_name, s.exchange,
-                   sm.symbol_id, sm.bse_code, sm.nse_code, sm.sector
+                   sm.symbol_id, sm.bse_code, sm.nse_code, sm.sector, sm.industry_group, sm.industry
             FROM stocks s
             LEFT JOIN symbol_master sm
                 ON sm.symbol = s.symbol
@@ -418,6 +458,8 @@ class DatabaseManager:
                 'bse_code': row[5],
                 'nse_code': row[6],
                 'sector': row[7],
+                'industry_group': row[8],
+                'industry': row[9],
             }
             for row in rows
         ]
@@ -430,7 +472,8 @@ class DatabaseManager:
                        confidence_score: int = None, risk_tags: str = None,
                        mistake_tags: str = None, reflection_note: str = None,
                        realized_pnl: float = None, realized_cost_basis: float = None,
-                       realized_match_method: str = None, sell_note: str = None) -> int:
+                       realized_match_method: str = None, sell_note: str = None,
+                       use_cash_ledger: bool = False) -> int:
         """Add a buy/sell transaction.
 
         For SELL transactions, realized P/L is calculated with FIFO lots unless
@@ -449,6 +492,23 @@ class DatabaseManager:
         cursor.execute("BEGIN IMMEDIATE")
 
         try:
+            trade_amount = float(quantity) * float(price_per_share)
+            user_id = None
+            if use_cash_ledger:
+                user_id = self._get_user_id_for_stock(conn, stock_id)
+                if user_id is None:
+                    raise ValueError("Unable to resolve user for stock transaction.")
+                self._bootstrap_cash_ledger_for_user(conn, user_id)
+                if tx_type == "BUY":
+                    available_cash = self._cash_balance_for_user(conn, user_id)
+                    if available_cash + 1e-9 < trade_amount:
+                        shortfall = trade_amount - available_cash
+                        raise ValueError(
+                            f"Insufficient available cash. "
+                            f"Available: ₹{available_cash:,.2f}, Required: ₹{trade_amount:,.2f}, "
+                            f"Shortfall: ₹{shortfall:,.2f}"
+                        )
+
             if tx_type == "SELL" and (realized_pnl is None or realized_cost_basis is None):
                 realized_pnl, realized_cost_basis, lot_matches = self._compute_fifo_realized_for_sell(
                     conn=conn,
@@ -494,6 +554,30 @@ class DatabaseManager:
                         for m in lot_matches
                     ],
                 )
+
+            if use_cash_ledger and user_id is not None:
+                if tx_type == "BUY":
+                    self._add_cash_ledger_entry_conn(
+                        conn=conn,
+                        user_id=user_id,
+                        entry_type="BUY_DEBIT",
+                        amount=trade_amount,
+                        entry_date=transaction_date,
+                        note=f"BUY {quantity} @ ₹{float(price_per_share):,.2f}",
+                        reference_transaction_id=transaction_id,
+                        enforce_balance=True,
+                    )
+                else:
+                    self._add_cash_ledger_entry_conn(
+                        conn=conn,
+                        user_id=user_id,
+                        entry_type="SELL_CREDIT",
+                        amount=trade_amount,
+                        entry_date=transaction_date,
+                        note=f"SELL {quantity} @ ₹{float(price_per_share):,.2f}",
+                        reference_transaction_id=transaction_id,
+                        enforce_balance=False,
+                    )
 
             conn.commit()
             return transaction_id
@@ -983,6 +1067,361 @@ class DatabaseManager:
         self._close_connection(conn)
         return True
 
+    # Cash ledger operations
+    @staticmethod
+    def _cash_ledger_sign(entry_type: str) -> int:
+        """Return +/- sign for cash ledger entry type."""
+        et = (entry_type or "").strip().upper()
+        if et in {"INIT_DEPOSIT", "DEPOSIT", "SELL_CREDIT"}:
+            return 1
+        if et in {"WITHDRAWAL", "BUY_DEBIT"}:
+            return -1
+        raise ValueError(f"Unsupported cash ledger entry_type: {entry_type}")
+
+    def _get_user_id_for_stock(self, conn, stock_id: int) -> Optional[int]:
+        """Resolve owner user_id for a stock."""
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM stocks WHERE stock_id = ? LIMIT 1", (stock_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return int(row[0])
+
+    def _cash_balance_for_user(self, conn, user_id: int) -> float:
+        """Compute available cash balance from ledger entries."""
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COALESCE(SUM(
+                CASE
+                    WHEN entry_type IN ('INIT_DEPOSIT', 'DEPOSIT', 'SELL_CREDIT') THEN amount
+                    WHEN entry_type IN ('WITHDRAWAL', 'BUY_DEBIT') THEN -amount
+                    ELSE 0
+                END
+            ), 0)
+            FROM cash_ledger
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        )
+        row = cursor.fetchone()
+        return float(row[0] or 0.0)
+
+    def _add_cash_ledger_entry_conn(
+        self,
+        conn,
+        user_id: int,
+        entry_type: str,
+        amount: float,
+        entry_date: Optional[str] = None,
+        note: Optional[str] = None,
+        reference_transaction_id: Optional[int] = None,
+        enforce_balance: bool = True,
+    ) -> int:
+        """Insert one ledger entry on an existing open DB connection."""
+        entry_type = (entry_type or "").strip().upper()
+        sign = self._cash_ledger_sign(entry_type)
+        amount = float(amount or 0.0)
+        if amount <= 0:
+            raise ValueError("Ledger amount must be > 0")
+
+        if sign < 0 and enforce_balance:
+            available = self._cash_balance_for_user(conn, user_id)
+            if available + 1e-9 < amount:
+                shortfall = amount - available
+                raise ValueError(
+                    f"Insufficient available cash. "
+                    f"Available: ₹{available:,.2f}, Required: ₹{amount:,.2f}, Shortfall: ₹{shortfall:,.2f}"
+                )
+
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO cash_ledger
+            (user_id, entry_type, amount, entry_date, note, reference_transaction_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                int(user_id),
+                entry_type,
+                amount,
+                (entry_date or datetime.now().date().isoformat()),
+                note,
+                reference_transaction_id,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    def _bootstrap_cash_ledger_for_user(self, conn, user_id: int) -> None:
+        """
+        Initialize ledger once for existing users by replaying historical transactions.
+
+        This keeps legacy portfolios functional while enforcing ledger checks for new buys.
+        """
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM cash_ledger WHERE user_id = ?", (user_id,))
+        existing = int((cursor.fetchone() or [0])[0] or 0)
+        if existing > 0:
+            self._ensure_initial_credit_floor(conn, user_id)
+            return
+
+        cursor.execute(
+            """
+            SELECT t.transaction_id, t.transaction_type, t.quantity, t.price_per_share, t.transaction_date
+            FROM transactions t
+            INNER JOIN stocks s ON s.stock_id = t.stock_id
+            WHERE s.user_id = ?
+            ORDER BY t.transaction_date ASC, t.transaction_id ASC
+            """,
+            (user_id,),
+        )
+        tx_rows = cursor.fetchall()
+        bootstrap_date = datetime.now().date().isoformat()
+        if tx_rows and tx_rows[0][4]:
+            bootstrap_date = tx_rows[0][4]
+
+        initial_credit = float(config.LEDGER_INITIAL_CREDIT or 0.0)
+        if initial_credit > 0:
+            self._add_cash_ledger_entry_conn(
+                conn=conn,
+                user_id=user_id,
+                entry_type="INIT_DEPOSIT",
+                amount=initial_credit,
+                entry_date=bootstrap_date,
+                note="Bootstrap opening capital",
+                enforce_balance=False,
+            )
+
+        for tx_id, tx_type, qty, price, tx_date in tx_rows:
+            amount = float((qty or 0) * (price or 0.0))
+            if amount <= 0:
+                continue
+            tx_upper = (tx_type or "").upper()
+            if tx_upper == "BUY":
+                entry_type = "BUY_DEBIT"
+            elif tx_upper == "SELL":
+                entry_type = "SELL_CREDIT"
+            else:
+                continue
+            self._add_cash_ledger_entry_conn(
+                conn=conn,
+                user_id=user_id,
+                entry_type=entry_type,
+                amount=amount,
+                entry_date=(tx_date or datetime.now().date().isoformat()),
+                note="Bootstrap from historical transaction",
+                reference_transaction_id=int(tx_id),
+                enforce_balance=False,
+            )
+        self._ensure_initial_credit_floor(conn, user_id)
+
+    def _ensure_initial_credit_floor(self, conn, user_id: int) -> None:
+        """
+        Ensure legacy bootstraps align to configured opening credit floor.
+
+        Safety rule:
+        - Apply only when there are no manual external entries (DEPOSIT/WITHDRAWAL).
+        """
+        desired = float(config.LEDGER_INITIAL_CREDIT or 0.0)
+        if desired <= 0:
+            return
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN entry_type = 'INIT_DEPOSIT' THEN amount ELSE 0 END), 0) AS init_total,
+                COALESCE(SUM(CASE WHEN entry_type IN ('DEPOSIT', 'WITHDRAWAL') THEN 1 ELSE 0 END), 0) AS external_entries
+            FROM cash_ledger
+            WHERE user_id = ?
+            """,
+            (int(user_id),),
+        )
+        row = cursor.fetchone() or [0, 0]
+        init_total = float(row[0] or 0.0)
+        external_entries = int(row[1] or 0)
+        if external_entries > 0:
+            return
+        if init_total + 1e-9 >= desired:
+            return
+        delta = desired - init_total
+        self._add_cash_ledger_entry_conn(
+            conn=conn,
+            user_id=int(user_id),
+            entry_type="INIT_DEPOSIT",
+            amount=delta,
+            entry_date=datetime.now().date().isoformat(),
+            note="One-time top-up to configured opening capital",
+            enforce_balance=False,
+        )
+
+    def ensure_cash_ledger_bootstrap(self, user_id: int) -> None:
+        """Ensure a user cash ledger is initialized once."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        try:
+            self._bootstrap_cash_ledger_for_user(conn, int(user_id))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._close_connection(conn)
+
+    def add_cash_ledger_entry(
+        self,
+        user_id: int,
+        entry_type: str,
+        amount: float,
+        entry_date: Optional[str] = None,
+        note: Optional[str] = None,
+        reference_transaction_id: Optional[int] = None,
+        enforce_balance: bool = True,
+    ) -> int:
+        """Add one cash ledger entry with optional balance enforcement."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        try:
+            self._bootstrap_cash_ledger_for_user(conn, int(user_id))
+            ledger_id = self._add_cash_ledger_entry_conn(
+                conn=conn,
+                user_id=int(user_id),
+                entry_type=entry_type,
+                amount=float(amount),
+                entry_date=entry_date,
+                note=note,
+                reference_transaction_id=reference_transaction_id,
+                enforce_balance=enforce_balance,
+            )
+            conn.commit()
+            return ledger_id
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._close_connection(conn)
+
+    def add_cash_deposit(self, user_id: int, amount: float, note: Optional[str] = None, entry_date: Optional[str] = None) -> int:
+        """Add funds to user ledger."""
+        return self.add_cash_ledger_entry(
+            user_id=user_id,
+            entry_type="DEPOSIT",
+            amount=amount,
+            entry_date=entry_date,
+            note=note,
+            enforce_balance=False,
+        )
+
+    def add_cash_withdrawal(self, user_id: int, amount: float, note: Optional[str] = None, entry_date: Optional[str] = None) -> int:
+        """Withdraw funds from user ledger (fails when insufficient balance)."""
+        return self.add_cash_ledger_entry(
+            user_id=user_id,
+            entry_type="WITHDRAWAL",
+            amount=amount,
+            entry_date=entry_date,
+            note=note,
+            enforce_balance=True,
+        )
+
+    def get_cash_ledger_summary(self, user_id: int) -> Dict:
+        """Return available/consumed cash summary for a user."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        try:
+            self._bootstrap_cash_ledger_for_user(conn, int(user_id))
+            cursor.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN entry_type IN ('INIT_DEPOSIT', 'DEPOSIT') THEN amount ELSE 0 END), 0) AS total_funded,
+                    COALESCE(SUM(CASE WHEN entry_type = 'WITHDRAWAL' THEN amount ELSE 0 END), 0) AS total_withdrawn,
+                    COALESCE(SUM(CASE WHEN entry_type = 'BUY_DEBIT' THEN amount ELSE 0 END), 0) AS total_buy_debit,
+                    COALESCE(SUM(CASE WHEN entry_type = 'SELL_CREDIT' THEN amount ELSE 0 END), 0) AS total_sell_credit
+                FROM cash_ledger
+                WHERE user_id = ?
+                """,
+                (int(user_id),),
+            )
+            row = cursor.fetchone() or [0, 0, 0, 0]
+            total_funded = float(row[0] or 0.0)
+            total_withdrawn = float(row[1] or 0.0)
+            total_buy_debit = float(row[2] or 0.0)
+            total_sell_credit = float(row[3] or 0.0)
+            available = (total_funded + total_sell_credit) - (total_buy_debit + total_withdrawn)
+            consumed = total_buy_debit
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._close_connection(conn)
+
+        return {
+            "user_id": int(user_id),
+            "total_funded": total_funded,
+            "total_withdrawn": total_withdrawn,
+            "total_buy_debit": total_buy_debit,
+            "total_sell_credit": total_sell_credit,
+            "available_cash": available,
+            "consumed_cash": consumed,
+        }
+
+    def get_cash_balance_as_of(self, user_id: int, as_of_date: str) -> float:
+        """Return ledger cash balance as of end of given date."""
+        self.ensure_cash_ledger_bootstrap(int(user_id))
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COALESCE(SUM(
+                CASE
+                    WHEN entry_type IN ('INIT_DEPOSIT', 'DEPOSIT', 'SELL_CREDIT') THEN amount
+                    WHEN entry_type IN ('WITHDRAWAL', 'BUY_DEBIT') THEN -amount
+                    ELSE 0
+                END
+            ), 0)
+            FROM cash_ledger
+            WHERE user_id = ?
+              AND entry_date <= ?
+            """,
+            (int(user_id), as_of_date),
+        )
+        row = cursor.fetchone()
+        self._close_connection(conn)
+        return float(row[0] or 0.0)
+
+    def get_cash_ledger_entries(self, user_id: int, limit: int = 200) -> List[Dict]:
+        """Get latest ledger entries for a user."""
+        self.ensure_cash_ledger_bootstrap(int(user_id))
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT ledger_id, user_id, entry_type, amount, entry_date, note, reference_transaction_id, created_at
+            FROM cash_ledger
+            WHERE user_id = ?
+            ORDER BY entry_date DESC, ledger_id DESC
+            LIMIT ?
+            """,
+            (int(user_id), max(1, int(limit))),
+        )
+        rows = cursor.fetchall()
+        self._close_connection(conn)
+        return [
+            {
+                "ledger_id": int(row[0]),
+                "user_id": int(row[1]),
+                "entry_type": row[2],
+                "amount": float(row[3] or 0.0),
+                "entry_date": row[4],
+                "note": row[5],
+                "reference_transaction_id": row[6],
+                "created_at": row[7],
+            }
+            for row in rows
+        ]
+
     # Symbol master operations
     def upsert_symbol_master(
         self,
@@ -992,6 +1431,8 @@ class DatabaseManager:
         bse_code: str = None,
         nse_code: str = None,
         sector: str = None,
+        industry_group: str = None,
+        industry: str = None,
         source: str = 'MANUAL',
         quote_symbol_yahoo: str = None
     ) -> int:
@@ -1001,19 +1442,32 @@ class DatabaseManager:
 
         cursor.execute("""
             INSERT INTO symbol_master
-            (symbol, company_name, exchange, bse_code, nse_code, sector, source, quote_symbol_yahoo, last_updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            (symbol, company_name, exchange, bse_code, nse_code, sector, industry_group, industry, source, quote_symbol_yahoo, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(symbol) DO UPDATE SET
                 company_name = excluded.company_name,
                 exchange = excluded.exchange,
                 bse_code = COALESCE(excluded.bse_code, symbol_master.bse_code),
                 nse_code = COALESCE(excluded.nse_code, symbol_master.nse_code),
-                sector = COALESCE(excluded.sector, symbol_master.sector),
+                sector = COALESCE(excluded.sector, excluded.industry_group, excluded.industry, symbol_master.sector),
+                industry_group = COALESCE(excluded.industry_group, symbol_master.industry_group),
+                industry = COALESCE(excluded.industry, symbol_master.industry),
                 source = excluded.source,
                 quote_symbol_yahoo = COALESCE(excluded.quote_symbol_yahoo, symbol_master.quote_symbol_yahoo),
                 is_active = 1,
                 last_updated = CURRENT_TIMESTAMP
-        """, (symbol.upper().strip(), company_name.strip(), exchange.strip(), bse_code, nse_code, sector, source, quote_symbol_yahoo))
+        """, (
+            symbol.upper().strip(),
+            company_name.strip(),
+            exchange.strip(),
+            bse_code,
+            nse_code,
+            sector or industry_group or industry,
+            industry_group,
+            industry,
+            source,
+            quote_symbol_yahoo
+        ))
 
         conn.commit()
 
@@ -1029,7 +1483,7 @@ class DatabaseManager:
 
         pattern = f"%{query.strip()}%"
         cursor.execute("""
-            SELECT symbol_id, symbol, company_name, exchange, bse_code, nse_code, sector, quote_symbol_yahoo
+            SELECT symbol_id, symbol, company_name, exchange, bse_code, nse_code, sector, industry_group, industry, quote_symbol_yahoo
             FROM symbol_master
             WHERE is_active = 1
               AND (symbol LIKE ? OR company_name LIKE ?)
@@ -1050,7 +1504,9 @@ class DatabaseManager:
                 'bse_code': row[4],
                 'nse_code': row[5],
                 'sector': row[6],
-                'quote_symbol_yahoo': row[7]
+                'industry_group': row[7],
+                'industry': row[8],
+                'quote_symbol_yahoo': row[9]
             }
             for row in rows
         ]
@@ -1061,7 +1517,7 @@ class DatabaseManager:
         cursor = conn.cursor()
 
         cursor.execute("""
-            SELECT symbol_id, symbol, company_name, exchange, bse_code, nse_code, sector, quote_symbol_yahoo
+            SELECT symbol_id, symbol, company_name, exchange, bse_code, nse_code, sector, industry_group, industry, quote_symbol_yahoo
             FROM symbol_master
             WHERE symbol = ?
         """, (symbol.upper().strip(),))
@@ -1078,7 +1534,9 @@ class DatabaseManager:
             'bse_code': row[4],
             'nse_code': row[5],
             'sector': row[6],
-            'quote_symbol_yahoo': row[7]
+            'industry_group': row[7],
+            'industry': row[8],
+            'quote_symbol_yahoo': row[9]
         }
 
     # Quarterly financials operations
@@ -1547,7 +2005,7 @@ class DatabaseManager:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT symbol_id, symbol, company_name, exchange, bse_code, nse_code, sector, quote_symbol_yahoo
+            SELECT symbol_id, symbol, company_name, exchange, bse_code, nse_code, sector, industry_group, industry, quote_symbol_yahoo
             FROM symbol_master
             WHERE bse_code = ?
             LIMIT 1
@@ -1564,7 +2022,9 @@ class DatabaseManager:
             'bse_code': row[4],
             'nse_code': row[5],
             'sector': row[6],
-            'quote_symbol_yahoo': row[7]
+            'industry_group': row[7],
+            'industry': row[8],
+            'quote_symbol_yahoo': row[9]
         }
 
     # Filings operations
@@ -1631,6 +2091,7 @@ class DatabaseManager:
         user_id: int,
         stock_id: int = None,
         category: str = None,
+        industry: str = None,
         limit: int = 500
     ) -> List[Dict]:
         """Get filings for user's portfolio with optional filters."""
@@ -1642,7 +2103,7 @@ class DatabaseManager:
                    f.pdf_link, f.source_exchange, f.source_ref, f.symbol_id,
                    f.category_override, f.override_locked, COALESCE(f.category_override, f.category) AS effective_category,
                    s.stock_id, s.symbol, s.company_name, s.exchange,
-                   sm.bse_code, sm.nse_code, sm.sector
+                   sm.bse_code, sm.nse_code, sm.industry, sm.industry_group, sm.sector
             FROM filings f
             JOIN stocks s ON f.stock_id = s.stock_id
             LEFT JOIN symbol_master sm
@@ -1657,6 +2118,9 @@ class DatabaseManager:
         if category and category != "ALL":
             query += " AND COALESCE(f.category_override, f.category) = ?"
             params.append(category)
+        if industry and industry != "ALL":
+            query += " AND COALESCE(sm.industry, sm.industry_group, sm.sector, 'Unknown') = ?"
+            params.append(industry)
 
         query += " ORDER BY f.announcement_date DESC, f.filing_id DESC LIMIT ?"
         params.append(limit)
@@ -1685,6 +2149,8 @@ class DatabaseManager:
                 'bse_code': row[16],
                 'nse_code': row[17],
                 'industry': row[18],
+                'industry_group': row[19],
+                'sector': row[20],
             }
             for row in rows
         ]
@@ -2253,11 +2719,31 @@ class DatabaseManager:
         notif_type: str,
         title: str,
         message: str,
-        metadata: Optional[Dict] = None
+        metadata: Optional[Dict] = None,
+        dedupe_key: Optional[str] = None,
     ) -> int:
         """Create a user/global notification."""
         conn = self.get_connection()
         cursor = conn.cursor()
+        user_scope = str(int(user_id)) if user_id is not None else "GLOBAL"
+
+        # De-duplication guard: if key already seen for this user/notif_type, reuse notification_id.
+        dedupe_key = (dedupe_key or "").strip() or None
+        if dedupe_key:
+            cursor.execute(
+                """
+                SELECT notification_id
+                FROM notification_dedupe_keys
+                WHERE user_scope = ? AND notif_type = ? AND dedupe_key = ?
+                LIMIT 1
+                """,
+                (user_scope, notif_type, dedupe_key),
+            )
+            row = cursor.fetchone()
+            if row and row[0]:
+                self._close_connection(conn)
+                return int(row[0])
+
         cursor.execute("""
             INSERT INTO notifications
             (user_id, notif_type, title, message, metadata_json, is_read, created_at)
@@ -2270,9 +2756,39 @@ class DatabaseManager:
             json.dumps(metadata or {}) if metadata is not None else None,
         ))
         notif_id = cursor.lastrowid
+        if dedupe_key:
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO notification_dedupe_keys
+                (user_scope, user_id, notif_type, dedupe_key, notification_id, created_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (user_scope, user_id, notif_type, dedupe_key, notif_id),
+            )
         conn.commit()
         self._close_connection(conn)
         return notif_id
+
+    def has_notification_dedupe(self, user_id: Optional[int], notif_type: str, dedupe_key: str) -> bool:
+        """Return True if a dedupe-key has already been used for notification creation."""
+        key = (dedupe_key or "").strip()
+        if not key:
+            return False
+        scope = str(int(user_id)) if user_id is not None else "GLOBAL"
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT 1
+            FROM notification_dedupe_keys
+            WHERE user_scope = ? AND notif_type = ? AND dedupe_key = ?
+            LIMIT 1
+            """,
+            (scope, notif_type, key),
+        )
+        row = cursor.fetchone()
+        self._close_connection(conn)
+        return bool(row)
 
     def get_user_notifications(self, user_id: int, unread_only: bool = False, limit: int = 100) -> List[Dict]:
         """List notifications for user (including global notifications)."""
@@ -2504,3 +3020,159 @@ class DatabaseManager:
                     total_value += qty[sid] * close_price
             series.append({"trade_date": date, "portfolio_value": total_value})
         return series
+
+    def get_portfolio_value_as_of(self, user_id: int, as_of_date: str) -> float:
+        """
+        Compute portfolio market value as-of a date.
+
+        Logic:
+        - Quantity per stock: net BUY/SELL transactions with transaction_date <= as_of_date
+        - Price per stock: latest BSE close_price with trade_date <= as_of_date
+        - Fallback price (if no BSE row): cached latest price, then avg_price
+        """
+        if not as_of_date:
+            return 0.0
+
+        stocks = self.get_user_stocks_with_symbol_master(user_id)
+        if not stocks:
+            return 0.0
+
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        total_value = 0.0
+
+        for stock in stocks:
+            stock_id = int(stock["stock_id"])
+            bse_code = (stock.get("bse_code") or "").strip()
+            avg_price = float(stock.get("avg_price") or 0.0)
+
+            cursor.execute(
+                """
+                SELECT COALESCE(SUM(
+                    CASE
+                        WHEN UPPER(transaction_type) = 'BUY' THEN quantity
+                        WHEN UPPER(transaction_type) = 'SELL' THEN -quantity
+                        ELSE 0
+                    END
+                ), 0)
+                FROM transactions
+                WHERE stock_id = ?
+                  AND transaction_date <= ?
+                """,
+                (stock_id, as_of_date),
+            )
+            qty_row = cursor.fetchone()
+            quantity = float((qty_row[0] if qty_row else 0.0) or 0.0)
+            if quantity <= 0:
+                continue
+
+            price = None
+            if bse_code:
+                cursor.execute(
+                    """
+                    SELECT close_price
+                    FROM bse_daily_prices
+                    WHERE bse_code = ?
+                      AND trade_date <= ?
+                    ORDER BY trade_date DESC
+                    LIMIT 1
+                    """,
+                    (bse_code, as_of_date),
+                )
+                p_row = cursor.fetchone()
+                if p_row and p_row[0] is not None:
+                    price = float(p_row[0])
+
+            if price is None:
+                cached = self.get_latest_price(stock_id)
+                if cached is not None:
+                    price = float(cached)
+                else:
+                    price = avg_price
+
+            total_value += quantity * float(price or 0.0)
+
+        self._close_connection(conn)
+        return float(total_value)
+
+    def get_portfolio_external_cash_flow(
+        self,
+        user_id: int,
+        start_date: str,
+        end_date: str
+    ) -> float:
+        """
+        Sum net external cash-flow for a user between two dates (inclusive).
+
+        Convention:
+        - DEPOSIT   => positive
+        - WITHDRAWAL => negative
+
+        Internal portfolio events (BUY_DEBIT / SELL_CREDIT) are excluded.
+        """
+        if not start_date or not end_date:
+            return 0.0
+
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COALESCE(SUM(
+                CASE
+                    WHEN entry_type = 'DEPOSIT' THEN amount
+                    WHEN entry_type = 'WITHDRAWAL' THEN -amount
+                    ELSE 0
+                END
+            ), 0)
+            FROM cash_ledger
+            WHERE user_id = ?
+              AND entry_date >= ?
+              AND entry_date <= ?
+            """,
+            (user_id, start_date, end_date),
+        )
+        row = cursor.fetchone()
+        self._close_connection(conn)
+        return float(row[0] or 0.0)
+
+    def get_portfolio_net_transaction_cash_flow(
+        self,
+        user_id: int,
+        start_date: str,
+        end_date: str
+    ) -> float:
+        """
+        Sum net transaction contribution between two dates (inclusive).
+
+        Convention:
+        - BUY  => positive contribution (capital moved into holdings)
+        - SELL => negative contribution (capital moved out of holdings)
+
+        Formula equivalent:
+            sum(BUY quantity * price_per_share) - sum(SELL quantity * price_per_share)
+        """
+        if not start_date or not end_date:
+            return 0.0
+
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COALESCE(SUM(
+                CASE
+                    WHEN UPPER(t.transaction_type) = 'BUY' THEN (t.quantity * t.price_per_share)
+                    WHEN UPPER(t.transaction_type) = 'SELL' THEN -(t.quantity * t.price_per_share)
+                    ELSE 0
+                END
+            ), 0)
+            FROM transactions t
+            JOIN stocks s ON t.stock_id = s.stock_id
+            WHERE s.user_id = ?
+              AND t.transaction_date > ?
+              AND t.transaction_date <= ?
+            """,
+            (user_id, start_date, end_date),
+        )
+        row = cursor.fetchone()
+        self._close_connection(conn)
+        return float(row[0] or 0.0)

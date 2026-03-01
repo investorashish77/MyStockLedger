@@ -54,6 +54,22 @@ CREATE TABLE IF NOT EXISTS transaction_lot_matches (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS cash_ledger (
+    ledger_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    entry_type TEXT NOT NULL,  -- INIT_DEPOSIT, DEPOSIT, WITHDRAWAL, BUY_DEBIT, SELL_CREDIT
+    amount REAL NOT NULL,
+    entry_date DATE,
+    note TEXT,
+    reference_transaction_id INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id),
+    FOREIGN KEY (reference_transaction_id) REFERENCES transactions(transaction_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cash_ledger_user_date
+ON cash_ledger(user_id, entry_date, ledger_id);
+
 -- Alerts Table
 CREATE TABLE IF NOT EXISTS alerts (
     alert_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,6 +113,8 @@ CREATE TABLE IF NOT EXISTS symbol_master (
     nse_code TEXT,
     quote_symbol_yahoo TEXT,
     sector TEXT,
+    industry_group TEXT,
+    industry TEXT,
     is_active BOOLEAN DEFAULT 1,
     source TEXT DEFAULT 'MANUAL',
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP

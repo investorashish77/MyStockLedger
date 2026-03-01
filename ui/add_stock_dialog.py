@@ -6,7 +6,7 @@ Dialog for adding stocks and transactions to portfolio
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                              QLineEdit, QPushButton, QComboBox, QTextEdit,
                              QDateEdit, QSpinBox, QDoubleSpinBox, QMessageBox,
-                             QFormLayout, QGroupBox, QCompleter)
+                             QFormLayout, QGroupBox, QCompleter, QInputDialog, QWidget)
 from PyQt5.QtCore import Qt, QDate, QTimer, QStringListModel
 from database.db_manager import DatabaseManager
 from services.stock_service import StockService
@@ -89,6 +89,22 @@ class AddStockDialog(QDialog):
         self.transaction_type = QComboBox()
         self.transaction_type.addItems(['BUY', 'SELL'])
         trans_layout.addRow("Type:", self.transaction_type)
+
+        self.cash_summary_label = QLabel("Available Cash: ₹0.00 | Consumed: ₹0.00")
+        self.cash_summary_label.setStyleSheet("color: #8FB8E1;")
+        trans_layout.addRow("Cash Ledger:", self.cash_summary_label)
+
+        add_funds_row = QHBoxLayout()
+        self.add_funds_btn = QPushButton("Add Funds")
+        self.add_funds_btn.clicked.connect(self._prompt_add_funds)
+        add_funds_row.addWidget(self.add_funds_btn)
+        self.withdraw_funds_btn = QPushButton("Withdraw Funds")
+        self.withdraw_funds_btn.clicked.connect(self._prompt_withdraw_funds)
+        add_funds_row.addWidget(self.withdraw_funds_btn)
+        add_funds_row.addStretch()
+        add_funds_widget = QWidget()
+        add_funds_widget.setLayout(add_funds_row)
+        trans_layout.addRow("", add_funds_widget)
         
         # Quantity
         self.quantity_input = QSpinBox()
@@ -194,6 +210,7 @@ class AddStockDialog(QDialog):
         buttons.addWidget(add_btn)
         
         layout.addLayout(buttons)
+        self._refresh_cash_summary()
 
     def _apply_active_theme(self):
         """Inherit currently active theme from main window."""
@@ -322,7 +339,8 @@ class AddStockDialog(QDialog):
                 confidence_score=confidence_score,
                 risk_tags=risk_tags if risk_tags else None,
                 mistake_tags=mistake_tags if mistake_tags else None,
-                reflection_note=reflection_note if reflection_note else None
+                reflection_note=reflection_note if reflection_note else None,
+                use_cash_ledger=True
             )
             
             # Save current price
@@ -337,8 +355,105 @@ class AddStockDialog(QDialog):
             
             self.accept()
         
+        except ValueError as e:
+            message = str(e)
+            if transaction_type == "BUY" and "Insufficient available cash" in message:
+                required = float(quantity) * float(price)
+                summary = self.db.get_cash_ledger_summary(self.user_id)
+                available = float(summary.get("available_cash") or 0.0)
+                needed = max(0.0, required - available)
+                reply = QMessageBox.question(
+                    self,
+                    "Insufficient Cash",
+                    f"{message}\n\nAdd funds now?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                if reply == QMessageBox.Yes:
+                    amount, ok = QInputDialog.getDouble(
+                        self,
+                        "Add Funds",
+                        f"Deposit Amount (minimum ₹{needed:,.2f}):",
+                        max(needed, 1.0),
+                        max(needed, 0.01),
+                        1_000_000_000.0,
+                        2,
+                    )
+                    if ok and amount > 0:
+                        self.db.add_cash_deposit(
+                            self.user_id,
+                            float(amount),
+                            note="Manual top-up from Add Transaction dialog",
+                            entry_date=self.date_input.date().toString('yyyy-MM-dd'),
+                        )
+                        self._refresh_cash_summary()
+                        self.add_stock()
+                        return
+            QMessageBox.critical(self, "Error", f"Failed to add stock: {message}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to add stock: {str(e)}")
+
+    def _refresh_cash_summary(self):
+        """Refresh ledger summary display."""
+        try:
+            summary = self.db.get_cash_ledger_summary(self.user_id)
+            available = float(summary.get("available_cash") or 0.0)
+            consumed = float(summary.get("consumed_cash") or 0.0)
+            self.cash_summary_label.setText(
+                f"Available Cash: ₹{available:,.2f} | Consumed: ₹{consumed:,.2f}"
+            )
+        except Exception:
+            self.cash_summary_label.setText("Available Cash: - | Consumed: -")
+
+    def _prompt_add_funds(self):
+        """Prompt user to add funds into cash ledger."""
+        amount, ok = QInputDialog.getDouble(
+            self,
+            "Add Funds",
+            "Deposit Amount:",
+            1000.0,
+            0.01,
+            1_000_000_000.0,
+            2,
+        )
+        if not ok or amount <= 0:
+            return
+        self.db.add_cash_deposit(
+            self.user_id,
+            float(amount),
+            note="Manual deposit from Add Transaction dialog",
+            entry_date=self.date_input.date().toString('yyyy-MM-dd'),
+        )
+        self._refresh_cash_summary()
+
+    def _prompt_withdraw_funds(self):
+        """Prompt user to withdraw funds from cash ledger."""
+        summary = self.db.get_cash_ledger_summary(self.user_id)
+        available = float(summary.get("available_cash") or 0.0)
+        if available <= 0:
+            QMessageBox.information(self, "Withdraw Funds", "No available cash to withdraw.")
+            return
+        amount, ok = QInputDialog.getDouble(
+            self,
+            "Withdraw Funds",
+            f"Withdrawal Amount (max ₹{available:,.2f}):",
+            min(available, 1000.0),
+            0.01,
+            available,
+            2,
+        )
+        if not ok or amount <= 0:
+            return
+        try:
+            self.db.add_cash_withdrawal(
+                self.user_id,
+                float(amount),
+                note="Manual withdrawal from Add Transaction dialog",
+                entry_date=self.date_input.date().toString('yyyy-MM-dd'),
+            )
+            self._refresh_cash_summary()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Withdraw Funds", str(exc))
 
     def _refresh_symbol_suggestions(self, raw_text: str):
         """Refresh input suggestions from symbol master."""

@@ -605,13 +605,18 @@ class PortfolioView(QWidget):
                 transaction_date=date_edit.date().toString("yyyy-MM-dd"),
                 investment_horizon=horizon or "LONG",
                 sell_note=note.toPlainText().strip() or None,
+                use_cash_ledger=True,
             )
             tx = self.db.get_transaction_by_id(tx_id)
             realized_pnl = float((tx or {}).get("realized_pnl") or 0.0)
+            cash_summary = self.db.get_cash_ledger_summary(self.current_user_id)
+            available_cash = float(cash_summary.get("available_cash") or 0.0)
             QMessageBox.information(
                 self,
                 "Sell Executed",
-                f"{symbol}: Sell transaction saved.\nRealized P/L: ₹{realized_pnl:,.2f}",
+                f"{symbol}: Sell transaction saved.\n"
+                f"Realized P/L: ₹{realized_pnl:,.2f}\n"
+                f"Available Cash: ₹{available_cash:,.2f}",
             )
             self.load_portfolio(self.current_user_id)
         except ValueError as exc:

@@ -52,6 +52,7 @@ class AlertsView(QWidget):
         self.current_user = None
         self.current_filings = []
         self.stock_filter_map = {}
+        self.industry_filter_map = {}
         self.category_options = [
             "ALL",
             "Results",
@@ -99,6 +100,11 @@ class AlertsView(QWidget):
         header.addWidget(QLabel("Category:"))
         header.addWidget(self.category_filter)
 
+        self.industry_filter = QComboBox()
+        self.industry_filter.currentIndexChanged.connect(self.filter_changed)
+        header.addWidget(QLabel("Industry:"))
+        header.addWidget(self.industry_filter)
+
         sync_btn = QPushButton("Sync Filings")
         sync_btn.clicked.connect(lambda: self.sync_filings(force_api=True))
         header.addWidget(sync_btn)
@@ -143,6 +149,7 @@ class AlertsView(QWidget):
         self.admin_sync_ann_btn.setVisible(can_admin)
         self.admin_sync_bhav_btn.setVisible(can_admin)
         self._load_stock_filter_options(user_id)
+        self._load_industry_filter_options(user_id)
         if sync_announcements:
             self.sync_filings(force_api=False)
         else:
@@ -190,11 +197,15 @@ class AlertsView(QWidget):
         selected_stock_id = self.stock_filter_map.get(self.stock_filter.currentText())
         if selected_stock_id == "ALL":
             selected_stock_id = None
+        selected_industry = self.industry_filter_map.get(self.industry_filter.currentText())
+        if selected_industry == "ALL":
+            selected_industry = None
         category = self.category_filter.currentText()
         filings = self.db.get_user_filings(
             user_id=user_id,
             stock_id=selected_stock_id,
             category=category,
+            industry=selected_industry,
             limit=500
         )
         self.current_filings = filings
@@ -244,6 +255,25 @@ class AlertsView(QWidget):
             self.stock_filter_map[label] = stock["stock_id"]
             self.stock_filter.addItem(label)
         self.stock_filter.blockSignals(False)
+
+    def _load_industry_filter_options(self, user_id: int):
+        """Load industry filter options from user's holdings metadata."""
+        enriched = self.db.get_user_stocks_with_symbol_master(user_id)
+        industries = set()
+        for row in enriched:
+            industries.add(
+                (row.get("industry") or row.get("industry_group") or row.get("sector") or "Unknown").strip() or "Unknown"
+            )
+        ordered = sorted(industries)
+
+        self.industry_filter.blockSignals(True)
+        self.industry_filter.clear()
+        self.industry_filter_map = {"All Industries": "ALL"}
+        self.industry_filter.addItem("All Industries")
+        for value in ordered:
+            self.industry_filter_map[value] = value
+            self.industry_filter.addItem(value)
+        self.industry_filter.blockSignals(False)
 
     def open_pdf(self, url: str):
         """Open pdf.
@@ -453,7 +483,10 @@ class AlertsView(QWidget):
         title.setStyleSheet("font-weight:700; font-size:13px;")
         root.addWidget(title)
 
-        meta = QLabel(f"BSE: {filing.get('bse_code') or '-'}   |   NSE: {filing.get('nse_code') or filing.get('symbol') or '-'}")
+        industry = filing.get("industry") or filing.get("industry_group") or filing.get("sector") or "Unknown"
+        meta = QLabel(
+            f"Industry: {industry}   |   BSE: {filing.get('bse_code') or '-'}   |   NSE: {filing.get('nse_code') or filing.get('symbol') or '-'}"
+        )
         meta.setStyleSheet("color:#718096; font-size:11px;")
         root.addWidget(meta)
 

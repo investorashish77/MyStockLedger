@@ -1,0 +1,4 @@
+interface:
+  display_name: "EquityJournal Dev Loop"
+  short_description: "Run EquityJournal build-review-test workflows"
+  default_prompt: "Use $equityjournal-dev-loop to implement a feature with tests, docs, and AI review."

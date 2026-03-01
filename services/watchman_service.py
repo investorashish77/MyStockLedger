@@ -150,6 +150,9 @@ class WatchmanService:
             category = self._classify_material_category(announcement.get("headline") or "")
             if not category:
                 continue
+            dedupe_key = self._material_notification_dedupe_key(stock, announcement, category)
+            if self.db.has_notification_dedupe(user_id, "MATERIAL_ALERT", dedupe_key):
+                continue
             short_summary = self._build_material_summary(announcement.get("headline") or "")
             title = f"{category} Alert 🚨"
             detail_url, alt_url = self._resolve_document_urls(announcement.get("attachment_url") or "")
@@ -173,7 +176,8 @@ class WatchmanService:
                     "category": category,
                     "detail_url": detail_url,
                     "alternate_url": alt_url,
-                }
+                },
+                dedupe_key=dedupe_key
             )
             alerts_created += 1
 
@@ -220,6 +224,29 @@ class WatchmanService:
             if any(keyword in text for keyword in keywords):
                 return category
         return None
+
+    @staticmethod
+    def _material_notification_dedupe_key(stock: Dict, announcement: Dict, category: str) -> str:
+        """Stable dedupe key for material alerts across repeated scans."""
+        exchange_ref_id = (announcement.get("exchange_ref_id") or "").strip().lower()
+        rss_guid = (announcement.get("rss_guid") or "").strip().lower()
+        attachment_url = (announcement.get("attachment_url") or "").strip()
+        headline = (announcement.get("headline") or "").strip().lower()
+        headline = re.sub(r"\s+", " ", headline)
+        headline = re.sub(r"[^a-z0-9 ]+", "", headline)
+        announcement_date = str(announcement.get("announcement_date") or "").strip()[:10]
+        scrip_code = str(announcement.get("scrip_code") or "").strip()
+
+        source_ref = exchange_ref_id or rss_guid
+        if not source_ref and attachment_url:
+            parsed = urlparse(attachment_url)
+            url_path = (parsed.path or "").strip().lower()
+            source_ref = f"{url_path}|{(parsed.query or '').strip().lower()}".strip("|")
+        if not source_ref:
+            source_ref = f"{scrip_code}|{announcement_date}|{headline}"
+
+        symbol = (stock.get("symbol") or "").strip().upper()
+        return f"{symbol}|{category.strip().lower()}|{str(source_ref).strip()}"
 
     @staticmethod
     def _build_material_summary(headline: str, max_words: int = 20) -> str:

@@ -1,0 +1,20 @@
+{
+  "name": "calculate_gains_loss",
+  "description": "Calculates the realized and unrealized gains/loss for a portfolio over a specific timeframe, accounting for all deposits and withdrawals.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "timeframe": {
+        "type": "string",
+        "enum": ["daily", "weekly", "monthly"],
+        "description": "The window of time to calculate performance for."
+      },
+      "end_date": {
+        "type": "string",
+        "format": "date",
+        "description": "The ending date for the calculation (usually 'today')."
+      }
+    },
+    "required": ["timeframe"]
+  }
+}

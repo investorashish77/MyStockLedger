@@ -46,6 +46,8 @@ class SymbolMasterService:
                 bse_code=(row.get("bse_code") or None),
                 nse_code=(row.get("nse_code") or None),
                 sector=(row.get("sector") or None),
+                industry_group=(row.get("industry_group") or None),
+                industry=(row.get("industry") or None),
                 source=source,
                 quote_symbol_yahoo=quote_symbol_yahoo
             )
@@ -57,15 +59,11 @@ class SymbolMasterService:
         reader = csv.DictReader(StringIO(csv_text))
         rows = [
             {
-                "symbol": (
-                    row.get("symbol")
-                    or row.get("SYMBOL")
-                    or row.get("Security Id")
-                    or row.get("Security ID")
-                ),
+                "symbol": self._derive_import_symbol(row),
                 "company_name": (
                     row.get("company_name")
                     or row.get("NAME OF COMPANY")
+                    or row.get("Name")
                     or row.get("company")
                     or row.get("Issuer Name")
                     or row.get("Security Name")
@@ -73,11 +71,18 @@ class SymbolMasterService:
                 "exchange": (
                     row.get("exchange")
                     or row.get("EXCHANGE")
-                    or ("BSE" if (row.get("Security Code") or row.get("BSE CODE")) else "NSE")
+                    or ("BSE" if (row.get("Security Code") or row.get("BSE CODE") or row.get("BSE Code")) else "NSE")
                 ),
-                "bse_code": row.get("bse_code") or row.get("BSE CODE") or row.get("Security Code"),
-                "nse_code": row.get("nse_code") or row.get("NSE CODE") or row.get("Security Id"),
-                "sector": row.get("sector") or row.get("INDUSTRY")
+                "bse_code": row.get("bse_code") or row.get("BSE CODE") or row.get("BSE Code") or row.get("Security Code"),
+                "nse_code": row.get("nse_code") or row.get("NSE CODE") or row.get("NSE Code") or row.get("Security Id"),
+                "industry_group": row.get("industry_group") or row.get("Industry Group"),
+                "industry": row.get("industry") or row.get("INDUSTRY") or row.get("Industry"),
+                "sector": (
+                    row.get("sector")
+                    or row.get("INDUSTRY")
+                    or row.get("Industry Group")
+                    or row.get("Industry")
+                ),
             }
             for row in reader
         ]
@@ -140,3 +145,22 @@ class SymbolMasterService:
         if exchange == "BSE":
             return f"{symbol}.BO"
         return symbol
+
+    def _derive_import_symbol(self, row: Dict) -> str:
+        """Derive stable symbol key from heterogeneous CSV headers."""
+        raw_symbol = (
+            row.get("symbol")
+            or row.get("SYMBOL")
+            or row.get("Security Id")
+            or row.get("Security ID")
+            or row.get("NSE CODE")
+            or row.get("NSE Code")
+            or row.get("nse_code")
+        )
+        symbol = self._normalize_symbol(raw_symbol)
+        if symbol:
+            return symbol
+        bse_code = (row.get("bse_code") or row.get("BSE CODE") or row.get("BSE Code") or row.get("Security Code") or "").strip()
+        if bse_code:
+            return self._normalize_symbol(f"BSE_{bse_code}")
+        return ""

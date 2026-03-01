@@ -44,7 +44,7 @@ class AlertService:
         self.stock_service = StockService()
         self.bse_feed_service = BSEFeedService(db_manager)
     
-    def check_price_targets(self, user_id: int) -> List[Dict]:
+    def check_price_targets(self, user_id: int, use_live_quotes: bool = True) -> List[Dict]:
         """
         Check if any stocks have reached their target prices
         Returns list of triggered alerts
@@ -62,9 +62,16 @@ class AlertService:
             # Get transactions for this stock to check target prices
             transactions = self.db.get_stock_transactions(stock_id)
             
-            # Get current price
-            quote_symbol = self.stock_service.to_quote_symbol(symbol, exchange=exchange)
-            current_price = self.stock_service.get_current_price(quote_symbol)
+            # Get current price (live or latest persisted DB quote).
+            if use_live_quotes:
+                quote_symbol = self.stock_service.to_quote_symbol(symbol, exchange=exchange)
+                current_price = self.stock_service.get_current_price(quote_symbol)
+                if current_price is not None:
+                    self.db.save_price(stock_id, float(current_price))
+                else:
+                    current_price = self.db.get_latest_price(stock_id)
+            else:
+                current_price = self.db.get_latest_price(stock_id)
             
             if not current_price:
                 continue

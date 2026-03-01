@@ -25,7 +25,12 @@ from services.bse_bhavcopy_service import BSEBhavcopyService
 from services.nsetools_adapter import NSEToolsAdapter
 from services.watchman_service import WatchmanService
 from services.financial_result_parser import FinancialResultParser
+from services.error_verification_service import ErrorVerificationService
 from utils.config import config
+try:
+    from ui.main_window import MainWindow
+except Exception:
+    MainWindow = None
 
 
 class TestAuthService(unittest.TestCase):
@@ -433,6 +438,30 @@ class TestDatabaseManager(unittest.TestCase):
         self.db.mark_all_notifications_read(user_id)
         self.assertEqual(self.db.get_unread_notifications_count(user_id), 0)
 
+    def test_add_notification_dedupe_key_prevents_duplicate_rows(self):
+        """Same dedupe key should map to one notification row only."""
+        user_id = self.db.create_user("9000000006", "Dedup User", "hash")
+        first_id = self.db.add_notification(
+            user_id,
+            "MATERIAL_ALERT",
+            "Material Alert",
+            "Company: TEST\n\n🧾Summary: One event",
+            {"announcement_id": 101},
+            dedupe_key="TEST|event-101",
+        )
+        second_id = self.db.add_notification(
+            user_id,
+            "MATERIAL_ALERT",
+            "Material Alert",
+            "Company: TEST\n\n🧾Summary: One event (duplicate)",
+            {"announcement_id": 101},
+            dedupe_key="TEST|event-101",
+        )
+        self.assertEqual(first_id, second_id)
+        rows = self.db.get_user_notifications(user_id, unread_only=False, limit=10)
+        material = [n for n in rows if n["notif_type"] == "MATERIAL_ALERT"]
+        self.assertEqual(len(material), 1)
+
     def test_get_user_stocks_with_symbol_master_matches_ns_suffix(self):
         """Stock rows with .NS should map to symbol_master base symbol."""
         user_id = self.db.create_user("9000000001", "Suffix User", "hash")
@@ -449,6 +478,24 @@ class TestDatabaseManager(unittest.TestCase):
         rows = self.db.get_user_stocks_with_symbol_master(user_id)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["bse_code"], "543270")
+
+    def test_symbol_master_populate_from_bse_company_csv_headers(self):
+        """Import should parse Name/BSE Code/NSE Code/Industry Group/Industry headers."""
+        service = SymbolMasterService(self.db)
+        csv_text = (
+            "Name,BSE Code,NSE Code,ISIN Code,Industry Group,Industry\n"
+            "Infosys Limited,500209,INFY,INE009A01021,Information Technology,Computers - Software\n"
+            "Reliance Industries Ltd,500325,RELIANCE,INE002A01018,Energy,Refineries & Marketing\n"
+        )
+        written = service.populate_symbols_from_csv_text(csv_text, source="BSE_COMPANY_CSV")
+        self.assertEqual(written, 2)
+
+        infy = self.db.get_symbol_by_symbol("INFY")
+        self.assertIsNotNone(infy)
+        self.assertEqual(infy["bse_code"], "500209")
+        self.assertEqual(infy["industry_group"], "Information Technology")
+        self.assertEqual(infy["industry"], "Computers - Software")
+        self.assertEqual(infy["sector"], "Information Technology")
 
     def test_bse_daily_price_upsert_and_portfolio_series(self):
         """Test bse daily price upsert and portfolio series.
@@ -486,6 +533,202 @@ class TestDatabaseManager(unittest.TestCase):
         self.assertEqual(series[0]["portfolio_value"], 1000.0)
         self.assertEqual(series[1]["portfolio_value"], 1100.0)
         self.assertEqual(series[2]["portfolio_value"], 600.0)
+
+    def test_portfolio_external_cash_flow_ignores_internal_buy_sell(self):
+        """Internal BUY/SELL events must not be counted as external cash flow."""
+        user_id = self.db.create_user("9000000010", "Flow User", "hash")
+        stock_id = self.db.add_stock(user_id, "ABC", "ABC Ltd", "NSE")
+        self.db.add_transaction(stock_id, "BUY", 10, 100.0, "2026-01-01", "LONG")
+        self.db.add_transaction(stock_id, "SELL", 4, 120.0, "2026-01-05", "LONG")
+        self.db.add_transaction(stock_id, "BUY", 2, 90.0, "2026-01-11", "LONG")
+
+        flow_1_10 = self.db.get_portfolio_external_cash_flow(
+            user_id=user_id,
+            start_date="2026-01-01",
+            end_date="2026-01-10",
+        )
+        self.assertAlmostEqual(flow_1_10, 0.0, places=2)
+
+        flow_6_10 = self.db.get_portfolio_external_cash_flow(
+            user_id=user_id,
+            start_date="2026-01-06",
+            end_date="2026-01-10",
+        )
+        self.assertAlmostEqual(flow_6_10, 0.0, places=2)
+
+    def test_portfolio_external_cash_flow_across_multiple_weeks(self):
+        """Validate weekly external cash-flow windows using deposit/withdrawal entries."""
+        user_id = self.db.create_user("9000000011", "Flow Weekly User", "hash")
+        # Week 1: +1000 - 200 => +800
+        self.db.add_cash_deposit(user_id, 1000.0, entry_date="2026-01-02", note="Bank transfer")
+        self.db.add_cash_withdrawal(user_id, 200.0, entry_date="2026-01-04", note="Bank withdrawal")
+        # Week 2: +500 - 80 => +420
+        self.db.add_cash_deposit(user_id, 500.0, entry_date="2026-01-09", note="Bank transfer")
+        self.db.add_cash_withdrawal(user_id, 80.0, entry_date="2026-01-10", note="Bank withdrawal")
+        # Week 3: +100 - 255 => -155
+        self.db.add_cash_deposit(user_id, 100.0, entry_date="2026-01-15", note="Bank transfer")
+        self.db.add_cash_withdrawal(user_id, 255.0, entry_date="2026-01-16", note="Bank withdrawal")
+
+        week1 = self.db.get_portfolio_external_cash_flow(user_id, "2026-01-01", "2026-01-07")
+        week2 = self.db.get_portfolio_external_cash_flow(user_id, "2026-01-08", "2026-01-14")
+        week3 = self.db.get_portfolio_external_cash_flow(user_id, "2026-01-15", "2026-01-21")
+
+        self.assertAlmostEqual(week1, 800.0, places=2)
+        self.assertAlmostEqual(week2, 420.0, places=2)
+        self.assertAlmostEqual(week3, -155.0, places=2)
+
+    def test_weekly_gain_formula_with_transactions_across_weeks(self):
+        """Weekly gain should use end-start-net_flow with multiple buy/sell events."""
+        user_id = self.db.create_user("9000000012", "Weekly Gain User", "hash")
+        stock_id = self.db.add_stock(user_id, "GOODLUCK", "Goodluck India Limited", "NSE")
+        self.db.upsert_symbol_master(
+            symbol="GOODLUCK",
+            company_name="Goodluck India Limited",
+            exchange="NSE",
+            bse_code="530655",
+            nse_code="GOODLUCK",
+            source="TEST"
+        )
+
+        # Holdings and cash-flow events in/around the target weekly window.
+        self.db.add_transaction(stock_id, "BUY", 10, 100.0, "2026-01-01", "LONG")
+        self.db.add_transaction(stock_id, "BUY", 5, 110.0, "2026-01-09", "LONG")
+        self.db.add_transaction(stock_id, "SELL", 3, 130.0, "2026-01-12", "LONG")
+        # Deliberately different from trade flow (+550 - 390 = +160).
+        self.db.add_cash_deposit(user_id, 500.0, entry_date="2026-01-09", note="External deposit")
+        self.db.add_cash_withdrawal(user_id, 80.0, entry_date="2026-01-12", note="External withdrawal")
+
+        # Daily closes to produce portfolio values on start and end dates.
+        self.db.upsert_bse_daily_price("530655", "2026-01-07", close_price=105.0)  # qty 10 => 1050
+        self.db.upsert_bse_daily_price("530655", "2026-01-09", close_price=110.0)
+        self.db.upsert_bse_daily_price("530655", "2026-01-12", close_price=118.0)
+        self.db.upsert_bse_daily_price("530655", "2026-01-14", close_price=120.0)  # qty 12 => 1440
+
+        series = self.db.get_portfolio_performance_series(user_id=user_id)
+        by_date = {row["trade_date"]: float(row["portfolio_value"]) for row in series}
+        v_start = by_date["2026-01-07"]
+        v_end = by_date["2026-01-14"]
+
+        net_flow = self.db.get_portfolio_net_transaction_cash_flow(
+            user_id=user_id,
+            start_date="2026-01-08",
+            end_date="2026-01-14",
+        )
+
+        gain_amount = v_end - v_start - net_flow
+        # v_start=1050, v_end=1440, net_flow=(+550 - 390)=160 => gain=230
+        # External flow is intentionally different (+500 - 80 = +420) and must not be used.
+        self.assertAlmostEqual(v_start, 1050.0, places=2)
+        self.assertAlmostEqual(v_end, 1440.0, places=2)
+        self.assertAlmostEqual(net_flow, 160.0, places=2)
+        self.assertAlmostEqual(gain_amount, 230.0, places=2)
+
+    def test_portfolio_value_as_of_includes_transactions_between_price_dates(self):
+        """As-of valuation should include quantity changes even on non-price dates."""
+        user_id = self.db.create_user("9000000013", "AsOf Value User", "hash")
+        stock_id = self.db.add_stock(user_id, "GOODLUCK", "Goodluck India Limited", "NSE")
+        self.db.upsert_symbol_master(
+            symbol="GOODLUCK",
+            company_name="Goodluck India Limited",
+            exchange="NSE",
+            bse_code="530655",
+            nse_code="GOODLUCK",
+            source="TEST"
+        )
+        self.db.add_transaction(stock_id, "BUY", 10, 100.0, "2026-01-01", "LONG")
+        # Trade between two available price dates.
+        self.db.add_transaction(stock_id, "BUY", 5, 110.0, "2026-01-10", "LONG")
+
+        self.db.upsert_bse_daily_price("530655", "2026-01-09", close_price=110.0)
+        self.db.upsert_bse_daily_price("530655", "2026-01-14", close_price=120.0)
+
+        # As-of 2026-01-11 should include qty=15 and use last close (2026-01-09 => 110).
+        v = self.db.get_portfolio_value_as_of(user_id, "2026-01-11")
+        self.assertAlmostEqual(v, 1650.0, places=2)
+
+    def test_cash_ledger_deposit_withdraw_summary(self):
+        """Cash ledger should track available and consumed amounts correctly."""
+        user_id = self.db.create_user("9000000030", "Ledger User", "hash")
+        stock_id = self.db.add_stock(user_id, "LEDGER", "Ledger Ltd", "NSE")
+        # Existing historical buy allows bootstrap: init deposit + buy debit.
+        self.db.add_transaction(stock_id, "BUY", 10, 100.0, "2026-01-01", "LONG")
+        base_credit = float(config.LEDGER_INITIAL_CREDIT or 0.0)
+
+        summary0 = self.db.get_cash_ledger_summary(user_id)
+        self.assertAlmostEqual(summary0["available_cash"], base_credit - 1000.0, places=2)
+        self.assertAlmostEqual(summary0["consumed_cash"], 1000.0, places=2)
+
+        self.db.add_cash_deposit(user_id, 500.0, note="Top up")
+        summary1 = self.db.get_cash_ledger_summary(user_id)
+        self.assertAlmostEqual(summary1["available_cash"], base_credit - 500.0, places=2)
+
+        self.db.add_cash_withdrawal(user_id, 200.0, note="Partial withdraw")
+        summary2 = self.db.get_cash_ledger_summary(user_id)
+        self.assertAlmostEqual(summary2["available_cash"], base_credit - 700.0, places=2)
+
+    def test_buy_with_cash_ledger_requires_available_funds(self):
+        """BUY with ledger enforcement should fail without available cash."""
+        user_id = self.db.create_user("9000000031", "Ledger Guard User", "hash")
+        stock_id = self.db.add_stock(user_id, "GUARD", "Guard Ltd", "NSE")
+        base_credit = float(config.LEDGER_INITIAL_CREDIT or 0.0)
+        required_amount = 2_000_000.0
+        price_per_share = 100.0
+        quantity = int(required_amount / price_per_share)
+
+        with self.assertRaises(ValueError):
+            self.db.add_transaction(
+                stock_id=stock_id,
+                transaction_type="BUY",
+                quantity=quantity,
+                price_per_share=price_per_share,
+                transaction_date="2026-01-05",
+                investment_horizon="LONG",
+                use_cash_ledger=True,
+            )
+
+        top_up = max(0.0, required_amount - base_credit)
+        if top_up > 0:
+            self.db.add_cash_deposit(user_id, top_up, note="Seed")
+        tx_id = self.db.add_transaction(
+            stock_id=stock_id,
+            transaction_type="BUY",
+            quantity=quantity,
+            price_per_share=price_per_share,
+            transaction_date="2026-01-05",
+            investment_horizon="LONG",
+            use_cash_ledger=True,
+        )
+        self.assertIsNotNone(tx_id)
+        summary = self.db.get_cash_ledger_summary(user_id)
+        self.assertAlmostEqual(summary["available_cash"], 0.0, places=2)
+
+    def test_sell_with_cash_ledger_credits_available_cash(self):
+        """SELL with ledger enforcement should credit cash balance."""
+        user_id = self.db.create_user("9000000032", "Ledger Credit User", "hash")
+        stock_id = self.db.add_stock(user_id, "CREDIT", "Credit Ltd", "NSE")
+        base_credit = float(config.LEDGER_INITIAL_CREDIT or 0.0)
+        before = self.db.get_cash_ledger_summary(user_id)["available_cash"]
+        self.db.add_transaction(
+            stock_id=stock_id,
+            transaction_type="BUY",
+            quantity=10,
+            price_per_share=100.0,
+            transaction_date="2026-01-01",
+            investment_horizon="LONG",
+            use_cash_ledger=True,
+        )
+        self.db.add_transaction(
+            stock_id=stock_id,
+            transaction_type="SELL",
+            quantity=4,
+            price_per_share=120.0,
+            transaction_date="2026-01-06",
+            investment_horizon="LONG",
+            use_cash_ledger=True,
+        )
+        summary = self.db.get_cash_ledger_summary(user_id)
+        expected = before - 1000.0 + 480.0
+        self.assertAlmostEqual(summary["available_cash"], expected, places=2)
 
     def test_analyst_consensus_upsert_and_get(self):
         """Test analyst consensus upsert and get.
@@ -535,7 +778,8 @@ class TestAlertService(unittest.TestCase):
         
         self.assertIsNotNone(alert_id)
         self.assertGreater(alert_id, 0)
-    
+
+
     def test_get_user_alerts(self):
         """Test retrieving user alerts"""
         user_id = self.db.create_user("9876543210", "Test User", "hash")
@@ -747,6 +991,145 @@ class TestAlertService(unittest.TestCase):
 
         filings = self.db.get_user_filings(user_id=user_id, limit=20)
         self.assertTrue(any(f["stock_id"] == stock_id for f in filings))
+
+    def test_get_user_filings_can_filter_by_industry(self):
+        """Industry filter should scope filings to matching holdings only."""
+        user_id = self.db.create_user("9999999996", "Industry Filter", "hash")
+        stock_it = self.db.add_stock(user_id, "INFY", "Infosys Limited", "NSE")
+        stock_pharma = self.db.add_stock(user_id, "SOLARA", "Solara Active Pharma", "NSE")
+        symbol_it = self.db.upsert_symbol_master(
+            symbol="INFY",
+            company_name="Infosys Limited",
+            exchange="NSE",
+            bse_code="500209",
+            nse_code="INFY",
+            industry_group="Information Technology",
+            industry="Computers - Software",
+            source="TEST"
+        )
+        symbol_pharma = self.db.upsert_symbol_master(
+            symbol="SOLARA",
+            company_name="Solara Active Pharma",
+            exchange="NSE",
+            bse_code="541540",
+            nse_code="SOLARA",
+            industry_group="Healthcare",
+            industry="Pharmaceuticals",
+            source="TEST"
+        )
+
+        self.db.upsert_filing(
+            stock_id=stock_it,
+            symbol_id=symbol_it,
+            category="General Update",
+            headline="INFY update",
+            announcement_summary="INFY filing",
+            announcement_date="2026-02-25",
+            pdf_link="https://example.com/infy.pdf",
+            source_exchange="BSE",
+            source_ref="infy-ref"
+        )
+        self.db.upsert_filing(
+            stock_id=stock_pharma,
+            symbol_id=symbol_pharma,
+            category="Results",
+            headline="SOLARA results",
+            announcement_summary="SOLARA filing",
+            announcement_date="2026-02-26",
+            pdf_link="https://example.com/solara.pdf",
+            source_exchange="BSE",
+            source_ref="solara-ref"
+        )
+
+        filtered = self.db.get_user_filings(user_id=user_id, industry="Pharmaceuticals", limit=20)
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["symbol"], "SOLARA")
+
+
+class _DummyKpiValueLabel:
+    """Lightweight label stub for KPI integration assertions."""
+
+    def __init__(self):
+        self.text = ""
+        self.style = ""
+
+    def setText(self, text):
+        self.text = text
+
+    def setStyleSheet(self, style):
+        self.style = style
+
+
+class _DummyKpiCard:
+    """Lightweight card stub with `_value` API used by MainWindow KPI code."""
+
+    def __init__(self):
+        self._value = _DummyKpiValueLabel()
+
+
+class _StubKpiStockService:
+    """Deterministic stock service for KPI integration test."""
+
+    @staticmethod
+    def to_quote_symbol(symbol, exchange=None, override_yahoo_symbol=None):
+        return override_yahoo_symbol or symbol
+
+    @staticmethod
+    def get_current_price(symbol):
+        return None
+
+
+@unittest.skipIf(MainWindow is None, "MainWindow import unavailable in this runtime")
+class TestMainWindowKpiIntegration(unittest.TestCase):
+    """Integration-level check for weekly KPI formula through MainWindow method."""
+
+    def setUp(self):
+        self.db = DatabaseManager(':memory:')
+        self.user_id = self.db.create_user("9000000020", "KPI User", "hash")
+        self.stock_id = self.db.add_stock(self.user_id, "GOODLUCK", "Goodluck India Limited", "NSE")
+        self.db.upsert_symbol_master(
+            symbol="GOODLUCK",
+            company_name="Goodluck India Limited",
+            exchange="NSE",
+            bse_code="530655",
+            nse_code="GOODLUCK",
+            source="TEST"
+        )
+        # Base holdings + intra-week activity.
+        self.db.add_transaction(self.stock_id, "BUY", 10, 100.0, "2026-01-01", "LONG")
+        self.db.add_transaction(self.stock_id, "BUY", 5, 110.0, "2026-01-09", "LONG")
+        self.db.add_transaction(self.stock_id, "SELL", 3, 130.0, "2026-01-12", "LONG")
+        # Keep external flow intentionally different than transaction contribution.
+        self.db.add_cash_deposit(self.user_id, 500.0, entry_date="2026-01-09", note="External deposit")
+        self.db.add_cash_withdrawal(self.user_id, 80.0, entry_date="2026-01-12", note="External withdrawal")
+
+        # Price series for weekly window ending 2026-01-14.
+        self.db.upsert_bse_daily_price("530655", "2026-01-07", close_price=105.0)  # qty=10 => 1050
+        self.db.upsert_bse_daily_price("530655", "2026-01-09", close_price=110.0)
+        self.db.upsert_bse_daily_price("530655", "2026-01-12", close_price=118.0)
+        self.db.upsert_bse_daily_price("530655", "2026-01-14", close_price=120.0)  # qty=12 => 1440
+
+    def test_update_global_kpis_weekly_gain_is_cashflow_adjusted(self):
+        dummy = type("DummyMainWindow", (), {})()
+        dummy.db = self.db
+        dummy.stock_service = _StubKpiStockService()
+        dummy.global_daily_kpi = _DummyKpiCard()
+        dummy.global_weekly_kpi = _DummyKpiCard()
+        dummy.global_total_kpi = _DummyKpiCard()
+        dummy.global_realized_kpi = _DummyKpiCard()
+
+        # Bind real MainWindow helpers onto dummy instance.
+        dummy._compute_period_gain = MainWindow._compute_period_gain.__get__(dummy, MainWindow)
+        dummy._series_value_on_or_before = MainWindow._series_value_on_or_before
+        dummy._set_kpi_value = MainWindow._set_kpi_value
+
+        MainWindow.update_global_kpis(dummy, self.user_id, use_live_quotes=False)
+
+        weekly_text = dummy.global_weekly_kpi._value.text
+        # Expected from formula: v_end(1440) - v_start(1050) - net_contribution(160) = 230
+        # If external flow (+420) were used, this would fail.
+        self.assertIn("₹230.00", weekly_text)
+        self.assertIn("+19.01%", weekly_text)
 
 
 class TestAISummaryService(unittest.TestCase):
@@ -1636,6 +2019,113 @@ class TestWatchmanService(unittest.TestCase):
         self.assertEqual(first["skipped_daily"], 0)
         self.assertEqual(second["skipped_daily"], 1)
 
+    def test_daily_material_scan_does_not_duplicate_after_read_and_rescan(self):
+        self.db.add_bse_announcement(
+            symbol_id=self.symbol_id,
+            scrip_code="530655",
+            headline="GOODLUCK receives order from overseas client worth Rs 95 crore",
+            category="Announcement",
+            announcement_date="2026-02-20",
+            attachment_url="https://www.bseindia.com/xml-data/corpfiling/AttachHis/material-4.pdf?ref=1",
+            exchange_ref_id="mat-4",
+            rss_guid="mat-4",
+        )
+        first = self.watchman.run_daily_material_scan(self.user_id, daily_only=False)
+        self.assertEqual(first["alerts_created"], 1)
+
+        notifs = self.db.get_user_notifications(self.user_id, unread_only=False, limit=20)
+        material = [n for n in notifs if n["notif_type"] == "MATERIAL_ALERT"]
+        self.assertEqual(len(material), 1)
+        self.db.mark_notification_read(material[0]["notification_id"])
+
+        # Simulate a re-scan pass over same announcements (e.g. cursor rewind/replay).
+        self.db.set_setting(f"{WatchmanService.MATERIAL_SCAN_LAST_ID_KEY_PREFIX}{self.user_id}", "0")
+        second = self.watchman.run_daily_material_scan(self.user_id, daily_only=False)
+        self.assertEqual(second["alerts_created"], 0)
+
+        notifs_after = self.db.get_user_notifications(self.user_id, unread_only=False, limit=20)
+        material_after = [n for n in notifs_after if n["notif_type"] == "MATERIAL_ALERT"]
+        self.assertEqual(len(material_after), 1)
+
+
+class TestErrorVerificationService(unittest.TestCase):
+    """Test parser error verification report generation."""
+
+    def setUp(self):
+        """Set up temp DB + log fixture."""
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp_dir.name, "test_eq.db")
+        self.log_path = os.path.join(self.tmp_dir.name, "equity_tracker.log")
+
+        self.db = DatabaseManager(self.db_path)
+        self.db.upsert_symbol_master(
+            symbol="GOODLUCK",
+            company_name="Goodluck India Limited",
+            exchange="NSE",
+            nse_code="GOODLUCK",
+            source="TEST",
+        )
+
+        with open(self.log_path, "w", encoding="utf-8") as f:
+            f.write(
+                "2026-02-24 01:36:35 | INFO | services.financial_result_parser | "
+                "Result parser output source=structured_text table_score=2 quarter=Q3 FY26 "
+                "Revenue[val=103715.52, norm=1037.16 Cr, yoy=+10.1% YoY (calc), qoq=+4.6% QoQ (calc)] | "
+                "EBITDA[val=NA, norm=NA, yoy=NA, qoq=NA] | "
+                "PAT[val=4346.99, norm=43.47 Cr, yoy=+8.4% YoY (calc), qoq=+5.2% QoQ (calc)] | "
+                "EPS[val=12.83, norm=NA, yoy=+8.3% YoY (calc), qoq=+7.4% QoQ (calc)] "
+                "special=None highlighted flags=None\n"
+            )
+            f.write(
+                "2026-02-24 01:36:35 | INFO | services.ai_summary_service | "
+                "Result parser hint symbol=GOODLUCK doc=abc123.pdf hint=Revenue: Current=103715.52\n"
+            )
+            f.write(
+                "2026-02-24 01:37:35 | INFO | services.financial_result_parser | "
+                "Result parser output source=table_text table_score=-1 quarter=NA "
+                "Revenue[val=NA, norm=NA, yoy=NA, qoq=NA] | "
+                "EBITDA[val=NA, norm=NA, yoy=NA, qoq=NA] | "
+                "PAT[val=NA, norm=NA, yoy=NA, qoq=NA] | "
+                "EPS[val=2025,, norm=NA, yoy=NA, qoq=NA] special=None highlighted flags=None\n"
+            )
+
+    def tearDown(self):
+        """Cleanup temp resources."""
+        self.tmp_dir.cleanup()
+
+    def test_generate_report_rows_latest_per_company(self):
+        """Latest-per-company should keep most recent row for same company."""
+        service = ErrorVerificationService(db_path=self.db_path, log_path=self.log_path)
+        rows = service.generate_report_rows(limit=50, latest_per_company=True)
+
+        self.assertEqual(len(rows), 2)  # Goodluck + Unknown
+        goodluck_row = next((r for r in rows if "Goodluck India Limited" in r["Company"]), None)
+        self.assertIsNotNone(goodluck_row)
+        self.assertIn(goodluck_row["Output"], {"Good", "Needs Review", "Poor"})
+
+    def test_generate_report_rows_contains_notes_for_missing_metrics(self):
+        """Poor parser output should include actionable notes for manual review."""
+        service = ErrorVerificationService(db_path=self.db_path, log_path=self.log_path)
+        rows = service.generate_report_rows(limit=50, latest_per_company=False)
+
+        poor_rows = [r for r in rows if r["Output"] == "Poor"]
+        self.assertTrue(poor_rows)
+        self.assertTrue(any("Revenue value missing" in r["Notes"] for r in poor_rows))
+
+    def test_rows_to_markdown_renders_tabular_report(self):
+        """Markdown renderer should produce requested tabular headers."""
+        rows = [
+            {
+                "Company": "Goodluck India Limited (GOODLUCK)",
+                "Output": "Needs Review",
+                "Score": "68",
+                "Notes": "EBITDA value missing",
+            }
+        ]
+        md = ErrorVerificationService.rows_to_markdown(rows)
+        self.assertIn("| Company | Output | Score | Notes |", md)
+        self.assertIn("Goodluck India Limited", md)
+
 
 def run_tests():
     """Run all unit tests"""
@@ -1651,6 +2141,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestAISummaryService))
     suite.addTests(loader.loadTestsFromTestCase(TestResearchDataLayer))
     suite.addTests(loader.loadTestsFromTestCase(TestWatchmanService))
+    suite.addTests(loader.loadTestsFromTestCase(TestErrorVerificationService))
     
     # Run tests
     runner = unittest.TextTestRunner(verbosity=2)

@@ -1,582 +1,659 @@
-"""
-Dashboard View
-Modern overview with KPI cards, trend signal, portfolio snapshot, and recent filings.
-"""
+"""Dashboard view for EquityJournal."""
 
 from datetime import datetime
 
-from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QTableWidget,
-    QTableWidgetItem, QHeaderView, QPushButton, QDialog, QTextEdit, QDialogButtonBox, QMessageBox,
-    QGraphicsDropShadowEffect
-)
-from PyQt5.QtGui import QFont, QColor, QPainter, QPen, QPainterPath, QLinearGradient
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen
+from PyQt5.QtWidgets import (
+    QAction,
+    QDialog,
+    QDialogButtonBox,
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QMessageBox,
+    QStyle,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+    QHeaderView,
+)
 
 from database.db_manager import DatabaseManager
 from services.ai_summary_service import AISummaryService
 from services.stock_service import StockService
+from ui.add_stock_dialog import AddStockDialog
+from ui.portfolio_view import PortfolioView
+from ui.ui_kit import SectionPanel, WeightBar
 from utils.config import config
 
 
-class PerformanceLineChart(QWidget):
-    """Simple line chart widget for portfolio trend visualization."""
+class PortfolioValueChart(QWidget):
+    """Dark-theme portfolio value line chart."""
 
     def __init__(self):
-        """Init.
-
-        Args:
-            None.
-
-        Returns:
-            Any: Method output for caller use.
-        """
         super().__init__()
-        self.values = []
-        self.setMinimumHeight(170)
+        self._points = []
+        self.setMinimumHeight(150)
 
-    def set_values(self, values):
-        """Set values.
+    def set_series(self, series_rows):
+        monthly = {}
+        for row in series_rows or []:
+            date_text = (row.get("trade_date") or "").strip()
+            value = float(row.get("portfolio_value") or 0.0)
+            if len(date_text) < 7:
+                continue
+            month_key = date_text[:7]
+            monthly[month_key] = value
+        if not monthly:
+            self._points = []
+            self.update()
+            return
 
-        Args:
-            values: Input parameter.
-
-        Returns:
-            Any: Method output for caller use.
-        """
-        self.values = [float(v) for v in values if v is not None]
+        keys = sorted(monthly.keys())[-7:]
+        self._points = [(k, monthly[k]) for k in keys]
         self.update()
 
     def paintEvent(self, event):
-        """Paintevent.
-
-        Args:
-            event: Input parameter.
-
-        Returns:
-            Any: Method output for caller use.
-        """
         super().paintEvent(event)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        rect = self.rect().adjusted(8, 8, -8, -8)
-        painter.setPen(QPen(QColor("#6B7788"), 1, Qt.DotLine))
-        painter.drawRect(rect)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.rect(), QColor("#0A1520"))
 
-        if len(self.values) < 2:
-            painter.setPen(QPen(QColor("#8FA4BD"), 1))
-            painter.drawText(rect.adjusted(8, 8, -8, -8), Qt.AlignCenter, "No trend data")
+        rect = self.rect().adjusted(12, 8, -12, -26)
+        if len(self._points) < 2:
+            p.setPen(QPen(QColor("#6D819A"), 1))
+            p.drawText(rect, Qt.AlignCenter, "No trend data")
             return
 
-        low = min(self.values)
-        high = max(self.values)
-        span = high - low or 1.0
-        step_x = rect.width() / (len(self.values) - 1)
+        values = [v for _, v in self._points]
+        low = min(values)
+        high = max(values)
+        span = (high - low) or 1.0
+        step_x = rect.width() / (len(values) - 1)
 
-        path = QPainterPath()
-        for i, value in enumerate(self.values):
+        coords = []
+        for i, value in enumerate(values):
             x = rect.left() + i * step_x
             y = rect.bottom() - ((value - low) / span) * rect.height()
-            if i == 0:
-                path.moveTo(x, y)
-            else:
-                path.lineTo(x, y)
+            coords.append((x, y))
+
+        path = QPainterPath()
+        path.moveTo(coords[0][0], coords[0][1])
+        for i in range(1, len(coords)):
+            prev_x, prev_y = coords[i - 1]
+            x, y = coords[i]
+            cx = (prev_x + x) / 2.0
+            path.cubicTo(cx, prev_y, cx, y, x, y)
 
         fill_path = QPainterPath(path)
         fill_path.lineTo(rect.right(), rect.bottom())
         fill_path.lineTo(rect.left(), rect.bottom())
         fill_path.closeSubpath()
 
-        gradient = QLinearGradient(rect.left(), rect.top(), rect.left(), rect.bottom())
-        gradient.setColorAt(0.0, QColor(61, 90, 254, 90))
-        gradient.setColorAt(1.0, QColor(61, 90, 254, 10))
-        painter.fillPath(fill_path, gradient)
+        grad = QLinearGradient(rect.left(), rect.top(), rect.left(), rect.bottom())
+        grad.setColorAt(0.0, QColor(14, 165, 233, 78))
+        grad.setColorAt(1.0, QColor(14, 165, 233, 0))
+        p.fillPath(fill_path, grad)
 
-        painter.setPen(QPen(QColor("#4F8DF0"), 2.2))
-        painter.drawPath(path)
+        p.setPen(QPen(QColor("#11B9FF"), 2.2))
+        p.drawPath(path)
+
+        # Highlight last point.
+        last_x, last_y = coords[-1]
+        p.setPen(QPen(QColor("#0A1520"), 2))
+        p.setBrush(QColor("#E6EDF3"))
+        p.drawEllipse(int(last_x - 4), int(last_y - 4), 8, 8)
+
+        # Month labels.
+        p.setPen(QPen(QColor("#3A5573"), 1))
+        for i, (month_key, _) in enumerate(self._points):
+            x = rect.left() + i * step_x
+            month_label = self._month_name(month_key)
+            p.drawText(int(x - 14), rect.bottom() + 20, 30, 14, Qt.AlignCenter, month_label)
+
+    @staticmethod
+    def _month_name(month_key: str) -> str:
+        try:
+            dt = datetime.strptime(month_key, "%Y-%m")
+            return dt.strftime("%b")
+        except Exception:
+            return month_key
+
+
+class DonutAllocationWidget(QWidget):
+    """Simple sector allocation donut chart."""
+
+    _colors = [
+        QColor("#22C55E"), QColor("#0EA5E9"), QColor("#A855F7"), QColor("#F59E0B"),
+        QColor("#F97316"), QColor("#EC4899"), QColor("#6366F1"), QColor("#14B8A6"),
+    ]
+
+    def __init__(self):
+        super().__init__()
+        self._segments = []
+        self.setFixedSize(122, 122)
+
+    def set_allocations(self, allocations: dict):
+        total = float(sum(max(0.0, float(v or 0.0)) for v in allocations.values()))
+        if total <= 0:
+            self._segments = []
+            self.update()
+            return
+        segments = []
+        for idx, (name, value) in enumerate(sorted(allocations.items(), key=lambda x: x[1], reverse=True)):
+            pct = float(value) / total
+            segments.append((name, pct, self._colors[idx % len(self._colors)]))
+        self._segments = segments
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+
+        outer = self.rect().adjusted(10, 10, -10, -10)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#0B1521"))
+        p.drawEllipse(outer)
+
+        if not self._segments:
+            p.setPen(QPen(QColor("#5A6D83"), 1))
+            p.drawText(self.rect(), Qt.AlignCenter, "No\nsector")
+            return
+
+        start = 90 * 16
+        for _name, pct, color in self._segments:
+            span = int(-pct * 360 * 16)
+            p.setBrush(color)
+            p.drawPie(outer, start, span)
+            start += span
+
+        inner = outer.adjusted(22, 22, -22, -22)
+        p.setBrush(QColor("#0A1520"))
+        p.drawEllipse(inner)
+
+
+class SortableTableWidgetItem(QTableWidgetItem):
+    """Table item with explicit sortable key (numeric/date/text safe)."""
+
+    SORT_ROLE = Qt.UserRole + 200
+
+    def __lt__(self, other):
+        if isinstance(other, QTableWidgetItem):
+            mine = self.data(self.SORT_ROLE)
+            theirs = other.data(self.SORT_ROLE)
+            if mine is not None and theirs is not None:
+                try:
+                    return mine < theirs
+                except Exception:
+                    pass
+        return super().__lt__(other)
 
 
 class DashboardView(QWidget):
-    """Overview dashboard for key portfolio and filings insights."""
+    """Overview dashboard with portfolio value, snapshot and portfolio table."""
 
     def __init__(
         self,
         db: DatabaseManager,
         stock_service: StockService,
         ai_service: AISummaryService = None,
-        show_kpis: bool = True
+        show_kpis: bool = True,
     ):
-        """Init.
-
-        Args:
-            db: Input parameter.
-            stock_service: Input parameter.
-            ai_service: Input parameter.
-            show_kpis: Input parameter.
-
-        Returns:
-            Any: Method output for caller use.
-        """
         super().__init__()
         self.db = db
         self.stock_service = stock_service
         self.ai_service = ai_service
         self.show_kpis = show_kpis
         self.current_user_id = None
-        self.current_range = "weekly"
-        self.current_notes = []
+        self.current_rows = []
+        self._portfolio_helper = PortfolioView(self.db, self.stock_service)
+        # Use PortfolioView only as an action helper (dialogs/transactions).
+        # Keep it non-visual so no legacy portfolio UI can bleed into dashboard.
+        self._portfolio_helper.setParent(self)
+        self._portfolio_helper.hide()
+        self._portfolio_helper.setGeometry(0, 0, 0, 0)
+        self._portfolio_helper.setMinimumSize(0, 0)
+        self._portfolio_helper.setMaximumSize(0, 0)
         self.setup_ui()
 
     def setup_ui(self):
-        """Setup ui.
+        self.setObjectName("dashboardRoot")
+        self.setAutoFillBackground(True)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(12)
 
-        Args:
-            None.
+        split = QHBoxLayout()
+        split.setSpacing(12)
+        root.addLayout(split)
 
-        Returns:
-            Any: Method output for caller use.
-        """
-        layout = QVBoxLayout()
-        self.setLayout(layout)
+        self.chart_panel = SectionPanel()
+        self.chart_panel.setObjectName("dashPanel")
+        split.addWidget(self.chart_panel, 3)
 
-        if self.show_kpis:
-            cards = QHBoxLayout()
-            self.daily_card = self._build_card("Daily Gain/Loss")
-            self.weekly_card = self._build_card("Weekly Gain/Loss")
-            self.overall_card = self._build_card("Total Returns")
-            cards.addWidget(self.daily_card)
-            cards.addWidget(self.weekly_card)
-            cards.addWidget(self.overall_card)
-            layout.addLayout(cards)
+        value_header = QHBoxLayout()
+        value_meta = QVBoxLayout()
+        self.portfolio_value_title = QLabel("PORTFOLIO VALUE")
+        self.portfolio_value_title.setObjectName("portfolioValueTitle")
+        self.portfolio_value_label = QLabel("₹0.00")
+        self.portfolio_value_label.setObjectName("portfolioValueAmount")
+        value_meta.addWidget(self.portfolio_value_title)
+        value_meta.addWidget(self.portfolio_value_label)
+        value_header.addLayout(value_meta)
+        value_header.addStretch()
 
-        middle = QHBoxLayout()
-        chart_panel = QFrame()
-        chart_panel.setObjectName("dashPanel")
-        self.chart_panel = chart_panel
-        chart_layout = QVBoxLayout()
-        chart_panel.setLayout(chart_layout)
-        chart_title = QLabel("PORTFOLIO PERFORMANCE CHART")
-        title_font = QFont()
-        title_font.setPointSize(13)
-        title_font.setBold(True)
-        chart_title.setFont(title_font)
-        chart_layout.addWidget(chart_title)
-        range_row = QHBoxLayout()
-        self.daily_btn = QPushButton("Daily")
-        self.weekly_btn = QPushButton("Weekly")
-        self.all_time_btn = QPushButton("All-Time")
-        self.daily_btn.clicked.connect(lambda: self.set_range("daily"))
-        self.weekly_btn.clicked.connect(lambda: self.set_range("weekly"))
-        self.all_time_btn.clicked.connect(lambda: self.set_range("all_time"))
-        range_row.addWidget(self.daily_btn)
-        range_row.addWidget(self.weekly_btn)
-        range_row.addWidget(self.all_time_btn)
-        range_row.addStretch()
-        chart_layout.addLayout(range_row)
-        self.trend_label = QLabel("No trend data")
-        self.trend_label.setObjectName("trendLabel")
-        self.chart = PerformanceLineChart()
-        chart_layout.addWidget(self.chart)
-        chart_layout.addWidget(self.trend_label)
-        middle.addWidget(chart_panel, 2)
+        value_right = QVBoxLayout()
+        self.total_return_badge = QLabel("0.00% total")
+        self.total_return_badge.setObjectName("returnBadgeNeutral")
+        self.invested_label = QLabel("Invested: ₹0.00")
+        self.invested_label.setObjectName("investedLabel")
+        value_right.addWidget(self.total_return_badge, 0, Qt.AlignRight)
+        value_right.addWidget(self.invested_label, 0, Qt.AlignRight)
+        value_header.addLayout(value_right)
+        self.chart_panel.body_layout.addLayout(value_header)
 
-        holdings_panel = QFrame()
-        holdings_panel.setObjectName("dashPanel")
-        self.holdings_panel = holdings_panel
-        holdings_layout = QVBoxLayout()
-        holdings_panel.setLayout(holdings_layout)
-        holdings_layout.addWidget(QLabel("My Holdings"))
-        self.holdings_table = QTableWidget()
-        self.holdings_table.setColumnCount(2)
-        self.holdings_table.setHorizontalHeaderLabels(["Asset", "P&L"])
-        h = self.holdings_table.horizontalHeader()
-        h.setSectionResizeMode(0, QHeaderView.Stretch)
-        h.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.holdings_table.verticalHeader().setDefaultSectionSize(38)
-        holdings_layout.addWidget(self.holdings_table)
-        middle.addWidget(holdings_panel, 1)
-        layout.addLayout(middle)
+        self.chart_widget = PortfolioValueChart()
+        self.chart_panel.body_layout.addWidget(self.chart_widget)
 
-        notes_panel = QFrame()
-        notes_panel.setObjectName("dashPanel")
-        self.notes_panel = notes_panel
-        notes_layout = QVBoxLayout()
-        notes_panel.setLayout(notes_layout)
-        notes_layout.addWidget(QLabel("Journal Notes"))
-        self.notes_table = QTableWidget()
-        self.notes_table.setColumnCount(4)
-        self.notes_table.setHorizontalHeaderLabels(["Symbol", "Date", "Note", "Analyst View"])
-        self.notes_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.notes_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.notes_table.verticalHeader().setDefaultSectionSize(46)
-        self.notes_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.notes_table.doubleClicked.connect(self._edit_selected_note)
-        notes_layout.addWidget(self.notes_table)
-        notes_hint = QLabel("Double-click a note row to edit and save.")
-        notes_hint.setObjectName("journalHint")
-        notes_layout.addWidget(notes_hint)
-        layout.addWidget(notes_panel)
+        self.snapshot_panel = SectionPanel("HOLDING SNAPSHOT")
+        self.snapshot_panel.setObjectName("dashPanel")
+        split.addWidget(self.snapshot_panel, 2)
+        if getattr(self.snapshot_panel, "_title_label", None):
+            self.snapshot_panel._title_label.setObjectName("portfolioValueTitle")
+
+        counts_row = QHBoxLayout()
+        self.winners_card = self._build_snapshot_metric_card("WINNERS", "0", "0%")
+        self.losers_card = self._build_snapshot_metric_card("LOSERS", "0", "0%")
+        counts_row.addWidget(self.winners_card)
+        counts_row.addWidget(self.losers_card)
+        self.snapshot_panel.body_layout.addLayout(counts_row)
+
+        best_worst = QFrame()
+        best_worst.setObjectName("bestWorstBox")
+        bw = QVBoxLayout(best_worst)
+        bw.setContentsMargins(10, 8, 10, 8)
+        bw.setSpacing(6)
+        best_row = QHBoxLayout()
+        best_row.setContentsMargins(0, 0, 0, 0)
+        best_row.setSpacing(8)
+        self.best_key = QLabel("Best performer")
+        self.best_key.setObjectName("bestWorstKey")
+        self.best_value = QLabel("-")
+        self.best_value.setObjectName("bestPerformer")
+        self.best_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        best_row.addWidget(self.best_key)
+        best_row.addStretch()
+        best_row.addWidget(self.best_value)
+        bw.addLayout(best_row)
+
+        worst_row = QHBoxLayout()
+        worst_row.setContentsMargins(0, 0, 0, 0)
+        worst_row.setSpacing(8)
+        self.worst_key = QLabel("Worst performer")
+        self.worst_key.setObjectName("bestWorstKey")
+        self.worst_value = QLabel("-")
+        self.worst_value.setObjectName("worstPerformer")
+        self.worst_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        worst_row.addWidget(self.worst_key)
+        worst_row.addStretch()
+        worst_row.addWidget(self.worst_value)
+        bw.addLayout(worst_row)
+        self.snapshot_panel.body_layout.addWidget(best_worst)
+
+        alloc_row = QHBoxLayout()
+        alloc_row.setContentsMargins(0, 0, 0, 0)
+        alloc_row.setSpacing(10)
+        self.industry_donut = DonutAllocationWidget()
+        alloc_row.addWidget(self.industry_donut, 0, Qt.AlignTop)
+
+        legend_wrap = QWidget()
+        self.industry_legend_layout = QVBoxLayout(legend_wrap)
+        self.industry_legend_layout.setContentsMargins(0, 2, 0, 0)
+        self.industry_legend_layout.setSpacing(5)
+        alloc_row.addWidget(legend_wrap, 1)
+        self.snapshot_panel.body_layout.addLayout(alloc_row)
+
+        self.portfolio_panel = SectionPanel("Portfolio")
+        self.portfolio_panel.setObjectName("dashPanel")
+        if getattr(self.portfolio_panel, "_title_label", None):
+            self.portfolio_panel._title_label.setObjectName("portfolioValueTitle")
+        root.addWidget(self.portfolio_panel, 1)
+
+        table_header = QHBoxLayout()
+        table_header.addStretch()
+        self.portfolio_panel.body_layout.addLayout(table_header)
+
+        self.portfolio_table = QTableWidget()
+        self.portfolio_table.setColumnCount(12)
+        self.portfolio_table.setHorizontalHeaderLabels([
+            "Date", "Symbol", "Industry", "Qty", "Avg Price", "LTP", "Investment", "Weight", "P&L", "Return", "Notes", "Action"
+        ])
+        header = self.portfolio_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        for idx in (3, 4, 5, 6, 8, 9, 10, 11):
+            header.setSectionResizeMode(idx, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(7, QHeaderView.Stretch)
+        self.portfolio_table.verticalHeader().setDefaultSectionSize(46)
+        self.portfolio_table.verticalHeader().setVisible(False)
+        self.portfolio_table.setAlternatingRowColors(True)
+        self.portfolio_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.portfolio_table.doubleClicked.connect(self._open_selected_transactions)
+        self.portfolio_table.setSortingEnabled(True)
+        self.portfolio_panel.body_layout.addWidget(self.portfolio_table)
+
         self._apply_depth_effects()
 
     @staticmethod
-    def _build_card(title: str):
-        """Build card.
-
-        Args:
-            title: Input parameter.
-
-        Returns:
-            Any: Method output for caller use.
-        """
+    def _build_snapshot_metric_card(title: str, value: str, pct: str) -> QFrame:
         card = QFrame()
-        card.setObjectName("kpiCard")
-        layout = QVBoxLayout()
+        card.setObjectName("snapshotMetricCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(2)
         t = QLabel(title)
-        t.setObjectName("kpiTitle")
-        v = QLabel("₹0.00")
-        v.setObjectName("kpiValue")
-        s = QLabel("0.00%")
-        s.setObjectName("kpiSub")
-        card._value = v
-        card._sub = s
+        t.setObjectName("snapshotMetricTitle")
+        v = QLabel(value)
+        v.setObjectName("snapshotMetricValue")
+        s = QLabel(pct)
+        s.setObjectName("snapshotMetricSub")
         layout.addWidget(t)
         layout.addWidget(v)
         layout.addWidget(s)
-        card.setLayout(layout)
+        card._title = t
+        card._value = v
+        card._sub = s
         return card
 
     def load_dashboard(self, user_id: int, use_live_quotes: bool = True):
-        """Load dashboard.
-
-        Args:
-            user_id: Input parameter.
-            use_live_quotes: Input parameter.
-
-        Returns:
-            Any: Method output for caller use.
-        """
         self.current_user_id = user_id
+        rows = self._build_portfolio_rows(user_id, use_live_quotes=use_live_quotes)
+        self.current_rows = rows
+
+        series = self.db.get_portfolio_performance_series(user_id=user_id)
+        self._render_value_panel(rows, series)
+        self._render_snapshot(rows)
+        self._render_portfolio_table(rows)
+
+    def _build_portfolio_rows(self, user_id: int, use_live_quotes: bool = True) -> list:
         portfolio = self.db.get_portfolio_summary(user_id)
-        series_all = self.db.get_portfolio_performance_series(user_id=user_id)
-        if self.show_kpis:
-            self._render_portfolio_metrics(portfolio, series_all, use_live_quotes=use_live_quotes)
-        self._render_trend(series_all)
-        self._render_holdings_table(portfolio, use_live_quotes=use_live_quotes)
-        self._render_journal_notes(user_id)
-        self._update_range_buttons()
+        enriched = self.db.get_user_stocks_with_symbol_master(user_id)
+        sector_by_stock = {r["stock_id"]: (r.get("sector") or "Unknown") for r in enriched}
+        industry_by_stock = {
+            r["stock_id"]: (r.get("industry") or r.get("industry_group") or r.get("sector") or "Unknown")
+            for r in enriched
+        }
 
-    def _render_portfolio_metrics(self, portfolio, series_all, use_live_quotes: bool = True):
-        """Render portfolio metrics.
-
-        Args:
-            portfolio: Input parameter.
-            series_all: Input parameter.
-            use_live_quotes: Input parameter.
-
-        Returns:
-            Any: Method output for caller use.
-        """
-        total_invested = 0.0
+        rows = []
         total_current = 0.0
 
-        for row in portfolio:
-            symbol = row["symbol"]
-            exchange = row.get("exchange")
-            qty = row["quantity"]
-            avg = row["avg_price"]
-            qsym = self.stock_service.to_quote_symbol(symbol, exchange=exchange)
-            current = self.db.get_latest_price(row["stock_id"]) or avg
-            if use_live_quotes:
-                current = self.stock_service.get_current_price(qsym) or current
-            invested = avg * qty
-            current_val = current * qty
-            total_invested += invested
-            total_current += current_val
+        for stock in portfolio:
+            symbol = stock["symbol"]
+            exchange = stock.get("exchange")
+            qty = int(stock.get("quantity") or 0)
+            avg_price = float(stock.get("avg_price") or 0.0)
 
-        total_daily = 0.0
-        total_weekly = 0.0
-        if series_all:
-            if len(series_all) >= 2:
-                total_daily = series_all[-1]["portfolio_value"] - series_all[-2]["portfolio_value"]
-            if len(series_all) >= 6:
-                total_weekly = series_all[-1]["portfolio_value"] - series_all[-6]["portfolio_value"]
-            elif len(series_all) >= 2:
-                total_weekly = series_all[-1]["portfolio_value"] - series_all[0]["portfolio_value"]
-
-        total_returns = total_current - total_invested
-        overall_pct = (total_returns / total_invested * 100) if total_invested else 0.0
-        daily_pct = (total_daily / total_current * 100) if total_current else 0.0
-        weekly_pct = (total_weekly / total_current * 100) if total_current else 0.0
-
-        self._set_card(self.daily_card, total_daily, daily_pct)
-        self._set_card(self.weekly_card, total_weekly, weekly_pct)
-        self._set_card(self.overall_card, total_returns, overall_pct)
-
-    def _render_trend(self, series_all):
-        """Render trend.
-
-        Args:
-            series_all: Input parameter.
-
-        Returns:
-            Any: Method output for caller use.
-        """
-        if not series_all:
-            self.chart.set_values([])
-            self.trend_label.setText("No trend data available (sync bhavcopy first).")
-            return
-        values = [row["portfolio_value"] for row in series_all]
-        if self.current_range == "daily":
-            selected = values[-2:] if len(values) >= 2 else values
-        elif self.current_range == "weekly":
-            selected = values[-7:] if len(values) >= 7 else values
-        else:
-            selected = values
-        self.chart.set_values(selected)
-        if selected:
-            delta = selected[-1] - selected[0]
-            self.trend_label.setText(
-                f"{self.current_range.title()} trend | Last: ₹{selected[-1]:,.2f} | Change: ₹{delta:,.2f}"
-            )
-        else:
-            self.trend_label.setText("No trend data")
-
-    def _render_holdings_table(self, portfolio, use_live_quotes: bool = True):
-        """Render holdings table.
-
-        Args:
-            portfolio: Input parameter.
-            use_live_quotes: Input parameter.
-
-        Returns:
-            Any: Method output for caller use.
-        """
-        self.holdings_table.setRowCount(0)
-        ranked = []
-        for row in portfolio:
-            symbol = row["symbol"]
-            exchange = row.get("exchange")
-            avg_price = row["avg_price"]
-            quantity = row["quantity"]
             quote_symbol = self.stock_service.to_quote_symbol(symbol, exchange=exchange)
-            current = self.db.get_latest_price(row["stock_id"]) or avg_price
+            current_price = float(self.db.get_latest_price(stock["stock_id"]) or avg_price)
             if use_live_quotes:
                 live_price = self.stock_service.get_current_price(quote_symbol)
                 if live_price is not None:
-                    current = live_price
-                    self.db.save_price(row["stock_id"], current)
-            pnl = (current - avg_price) * quantity
-            ranked.append((symbol, pnl))
-        ranked.sort(key=lambda x: abs(x[1]), reverse=True)
-        for i, (symbol, pnl) in enumerate(ranked[:8]):
-            self.holdings_table.insertRow(i)
-            self.holdings_table.setItem(i, 0, QTableWidgetItem(symbol))
-            pnl_item = QTableWidgetItem(f"₹{pnl:,.2f}")
-            pnl_item.setForeground(QColor("#2E7D32" if pnl >= 0 else "#C62828"))
-            self.holdings_table.setItem(i, 1, pnl_item)
+                    current_price = float(live_price)
+                    self.db.save_price(stock["stock_id"], current_price)
 
-    def _render_journal_notes(self, user_id: int):
-        """Render journal notes.
+            investment = avg_price * qty
+            current_value = current_price * qty
+            pnl = current_value - investment
+            return_pct = (pnl / investment * 100.0) if investment > 0 else 0.0
 
-        Args:
-            user_id: Input parameter.
+            txs = self.db.get_stock_transactions(stock["stock_id"]) or []
+            latest_date = txs[0].get("transaction_date") if txs else "-"
+            latest_note = ""
+            for tx in txs:
+                thesis = (tx.get("thesis") or "").strip()
+                if thesis:
+                    latest_note = thesis
+                    break
 
-        Returns:
-            Any: Method output for caller use.
-        """
-        self.notes_table.setRowCount(0)
-        self.current_notes = self.db.get_user_journal_notes(user_id)
-        for i, row in enumerate(self.current_notes):
-            self.notes_table.insertRow(i)
-            symbol_item = QTableWidgetItem(row["symbol"])
-            symbol_item.setData(Qt.UserRole, row["transaction_id"])
-            self.notes_table.setItem(i, 0, symbol_item)
-            self.notes_table.setItem(i, 1, QTableWidgetItem(row.get("transaction_date") or "-"))
-            note_text = row.get("thesis") or ""
-            brief = note_text if len(note_text) <= 180 else f"{note_text[:177]}..."
-            note_item = QTableWidgetItem(brief)
-            note_item.setToolTip(note_text)
-            self.notes_table.setItem(i, 2, note_item)
-            btn = QPushButton("Analyst View")
-            btn.setObjectName("actionBlendBtn")
-            btn.clicked.connect(lambda _=False, idx=i: self._open_analyst_view(idx))
-            self.notes_table.setCellWidget(i, 3, btn)
+            row = {
+                "stock_id": stock["stock_id"],
+                "symbol": symbol,
+                "company_name": stock.get("company_name") or symbol,
+                "date": latest_date or "-",
+                "qty": qty,
+                "avg_price": avg_price,
+                "ltp": current_price,
+                "investment": investment,
+                "current_value": current_value,
+                "pnl": pnl,
+                "return_pct": return_pct,
+                "note": latest_note,
+                "sector": sector_by_stock.get(stock["stock_id"], "Unknown") or "Unknown",
+                "industry": industry_by_stock.get(stock["stock_id"], "Unknown") or "Unknown",
+            }
+            rows.append(row)
+            total_current += current_value
 
-    def _ensure_analyst_view_for_stock(self, note_row: dict) -> bool:
-        """Generate analyst view for one stock if missing."""
-        stock_id = note_row.get("stock_id")
-        if not stock_id:
-            return False
-        existing = self.db.get_analyst_consensus(stock_id)
-        if existing and (existing.get("report_text") or "").strip():
-            return True
-        if not self.ai_service or not self.ai_service.is_available():
-            return False
+        for row in rows:
+            row["weight"] = (row["current_value"] / total_current * 100.0) if total_current else 0.0
 
-        as_of_date = datetime.now().strftime("%Y-%m-%d")
-        current_price = self.db.get_latest_price(stock_id)
-        result = self.ai_service.generate_analyst_consensus(
-            company_name=note_row.get("company_name") or note_row.get("symbol") or "",
-            stock_symbol=note_row.get("symbol") or "",
-            current_price=current_price,
-            as_of_date=as_of_date,
-        )
-        if result and (result.get("summary_text") or "").strip():
-            self.db.upsert_analyst_consensus(
-                stock_id=stock_id,
-                report_text=result.get("summary_text"),
-                status="GENERATED",
-                provider=result.get("provider") or self.ai_service.provider,
-                as_of_date=as_of_date,
-            )
-            return True
+        rows.sort(key=lambda r: r["current_value"], reverse=True)
+        return rows
 
-        self.db.upsert_analyst_consensus(
-            stock_id=stock_id,
-            report_text=None,
-            status="FAILED",
-            provider=self.ai_service.provider if self.ai_service else None,
-            as_of_date=as_of_date,
-        )
-        return False
+    def _render_value_panel(self, rows: list, series: list):
+        total_current = sum(r["current_value"] for r in rows)
+        total_invested = sum(r["investment"] for r in rows)
+        total_return = total_current - total_invested
+        total_pct = (total_return / total_invested * 100.0) if total_invested else 0.0
 
-    def _open_analyst_view(self, row_idx: int):
-        """Open analyst view.
+        self.portfolio_value_label.setText(f"₹{total_current:,.2f}")
+        self.invested_label.setText(f"Invested: ₹{total_invested:,.2f}")
+        self.total_return_badge.setText(f"{total_pct:+.2f}% total")
 
-        Args:
-            row_idx: Input parameter.
+        if total_return >= 0:
+            self.total_return_badge.setObjectName("returnBadgePositive")
+        else:
+            self.total_return_badge.setObjectName("returnBadgeNegative")
+        self.total_return_badge.style().unpolish(self.total_return_badge)
+        self.total_return_badge.style().polish(self.total_return_badge)
 
-        Returns:
-            Any: Method output for caller use.
-        """
-        if row_idx < 0 or row_idx >= len(self.current_notes):
-            return
-        note_row = self.current_notes[row_idx]
-        stock_id = note_row.get("stock_id")
-        if not stock_id:
-            QMessageBox.information(self, "Analyst View", "Stock reference not available.")
-            return
-        if not self._ensure_analyst_view_for_stock(note_row):
-            QMessageBox.information(
-                self,
-                "Analyst View",
-                "Unable to generate analyst consensus now (possible rate limit). Try again later."
-            )
-            return
-        report = self.db.get_analyst_consensus(stock_id)
-        if not report or not (report.get("report_text") or "").strip():
-            QMessageBox.information(self, "Analyst View", "Analyst consensus not available yet.")
-            return
+        self.chart_widget.set_series(series)
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"Analyst View - {note_row.get('symbol')}")
-        dialog.resize(820, 560)
-        self._apply_active_theme(dialog)
-        root = QVBoxLayout(dialog)
-        meta = QLabel(
-            f"{note_row.get('company_name') or note_row.get('symbol')} | "
-            f"As of: {report.get('as_of_date') or '-'} | "
-            f"Provider: {report.get('provider') or '-'}"
-        )
-        root.addWidget(meta)
-        viewer = QTextEdit()
-        viewer.setReadOnly(True)
-        viewer.setPlainText(report.get("report_text") or "")
-        root.addWidget(viewer)
-        ok_btn = QDialogButtonBox(QDialogButtonBox.Ok)
-        ok_btn.accepted.connect(dialog.accept)
-        root.addWidget(ok_btn)
-        dialog.exec_()
+    def _render_snapshot(self, rows: list):
+        winners = [r for r in rows if r["pnl"] > 0]
+        losers = [r for r in rows if r["pnl"] < 0]
+        total = len(rows) or 1
 
-    def _edit_selected_note(self, index):
-        """Edit selected note.
+        self.winners_card._value.setText(str(len(winners)))
+        self.winners_card._sub.setText(f"{(len(winners) / total * 100):.0f}% of holdings")
 
-        Args:
-            index: Input parameter.
+        self.losers_card._value.setText(str(len(losers)))
+        self.losers_card._sub.setText(f"{(len(losers) / total * 100):.0f}% of holdings")
 
-        Returns:
-            Any: Method output for caller use.
-        """
+        if rows:
+            best = max(rows, key=lambda r: r["return_pct"])
+            worst = min(rows, key=lambda r: r["return_pct"])
+            self.best_value.setText(f"{best['symbol']} {best['return_pct']:+.2f}%")
+            self.worst_value.setText(f"{worst['symbol']} {worst['return_pct']:+.2f}%")
+        else:
+            self.best_value.setText("-")
+            self.worst_value.setText("-")
+        self._render_industry_allocation(rows)
+
+    def _render_portfolio_table(self, rows: list):
+        self.portfolio_table.setSortingEnabled(False)
+        self.portfolio_table.setRowCount(0)
+
+        for idx, row in enumerate(rows):
+            self.portfolio_table.insertRow(idx)
+
+            date_item = SortableTableWidgetItem(row["date"])
+            date_item.setData(Qt.UserRole, row["stock_id"])
+            date_item.setData(Qt.UserRole + 1, row["symbol"])
+            date_item.setData(SortableTableWidgetItem.SORT_ROLE, self._date_sort_key(row["date"]))
+            self.portfolio_table.setItem(idx, 0, date_item)
+
+            symbol_item = SortableTableWidgetItem(f"{row['symbol']} - {row['company_name']}")
+            symbol_item.setData(SortableTableWidgetItem.SORT_ROLE, (row["symbol"] or "").upper())
+            self.portfolio_table.setItem(idx, 1, symbol_item)
+
+            industry = row.get("industry") or "Unknown"
+            industry_item = SortableTableWidgetItem(industry)
+            industry_item.setData(SortableTableWidgetItem.SORT_ROLE, industry.upper())
+            self.portfolio_table.setItem(idx, 2, industry_item)
+
+            self.portfolio_table.setItem(idx, 3, QTableWidgetItem(str(row["qty"])))
+            self.portfolio_table.setItem(idx, 4, QTableWidgetItem(f"₹{row['avg_price']:,.2f}"))
+            self.portfolio_table.setItem(idx, 5, QTableWidgetItem(f"₹{row['ltp']:,.2f}"))
+
+            investment_item = SortableTableWidgetItem(f"₹{row['investment']:,.2f}")
+            investment_item.setData(SortableTableWidgetItem.SORT_ROLE, float(row["investment"]))
+            self.portfolio_table.setItem(idx, 6, investment_item)
+
+            weight_item = SortableTableWidgetItem(f"{row['weight']:.2f}%")
+            weight_item.setData(SortableTableWidgetItem.SORT_ROLE, float(row["weight"]))
+            self.portfolio_table.setItem(idx, 7, weight_item)
+            self.portfolio_table.setCellWidget(idx, 7, self._build_weight_cell(row["weight"]))
+
+            pnl_item = SortableTableWidgetItem(f"₹{row['pnl']:,.2f}")
+            pnl_item.setData(SortableTableWidgetItem.SORT_ROLE, float(row["pnl"]))
+            pnl_item.setForeground(QColor("#34D399" if row["pnl"] >= 0 else "#F87171"))
+            self.portfolio_table.setItem(idx, 8, pnl_item)
+
+            ret_item = SortableTableWidgetItem(f"{row['return_pct']:+.2f}%")
+            ret_item.setData(SortableTableWidgetItem.SORT_ROLE, float(row["return_pct"]))
+            ret_item.setForeground(QColor("#34D399" if row["return_pct"] >= 0 else "#F87171"))
+            self.portfolio_table.setItem(idx, 9, ret_item)
+
+            self.portfolio_table.setCellWidget(idx, 10, self._build_note_cell(row))
+            self.portfolio_table.setCellWidget(idx, 11, self._build_action_cell(row))
+
+        # Holdings count intentionally not shown to reduce visual clutter.
+        self.portfolio_table.setSortingEnabled(True)
+        self.portfolio_table.sortItems(6, Qt.DescendingOrder)
+
+    def _build_note_cell(self, row: dict) -> QWidget:
+        wrap = QWidget()
+        layout = QHBoxLayout(wrap)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        btn = QToolButton()
+        btn.setObjectName("inlineDocBtn")
+        btn.setIcon(self.style().standardIcon(QStyle.SP_FileIcon))
+        note_text = row.get("note") or "No journal note available."
+        btn.setToolTip(note_text)
+        btn.clicked.connect(lambda _=False, r=row: self._edit_note_for_row(r))
+        layout.addWidget(btn, 0, Qt.AlignCenter)
+        return wrap
+
+    def _build_action_cell(self, row: dict) -> QWidget:
+        wrap = QWidget()
+        layout = QHBoxLayout(wrap)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        btn = QToolButton()
+        btn.setObjectName("inlineActionBtn")
+        btn.setText("⋮")
+        btn.setPopupMode(QToolButton.InstantPopup)
+
+        menu = QMenu(btn)
+        self._apply_active_theme(menu)
+        action_view = QAction("View Transactions", btn)
+        action_view.triggered.connect(lambda: self._open_transactions_for_row(row))
+        action_sell = QAction("Sell", btn)
+        action_sell.triggered.connect(lambda: self._open_sell_for_row(row))
+        menu.addAction(action_view)
+        menu.addAction(action_sell)
+        btn.setMenu(menu)
+
+        layout.addWidget(btn, 0, Qt.AlignCenter)
+        return wrap
+
+    def _build_weight_cell(self, weight_pct: float) -> QWidget:
+        wrap = QWidget()
+        layout = QVBoxLayout(wrap)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(2)
+        lbl = QLabel(f"{weight_pct:.1f}%")
+        lbl.setObjectName("weightPctLabel")
+        bar = WeightBar(weight_pct)
+        layout.addWidget(lbl)
+        layout.addWidget(bar)
+        return wrap
+
+    def _open_selected_transactions(self, index):
         row = index.row()
-        if row < 0 or row >= len(self.current_notes):
+        marker = self.portfolio_table.item(row, 0)
+        stock_id = marker.data(Qt.UserRole) if marker else None
+        symbol = marker.data(Qt.UserRole + 1) if marker else ""
+        if not stock_id:
             return
-        note_row = self.current_notes[row]
-        transaction_id = note_row["transaction_id"]
+        self._portfolio_helper.current_user_id = self.current_user_id
+        self._portfolio_helper.open_stock_transactions(stock_id, symbol)
+
+    def _open_transactions_for_row(self, row: dict):
+        self._portfolio_helper.current_user_id = self.current_user_id
+        self._portfolio_helper.open_stock_transactions(row["stock_id"], row["symbol"])
+
+    def _open_sell_for_row(self, row: dict):
+        self._portfolio_helper.current_user_id = self.current_user_id
+        self._portfolio_helper.open_sell_dialog(row["stock_id"], row["symbol"], int(row.get("qty") or 0))
+        if self.current_user_id:
+            self.load_dashboard(self.current_user_id, use_live_quotes=False)
+
+    def _edit_note_for_row(self, row: dict):
+        txs = self.db.get_stock_transactions(row["stock_id"]) or []
+        target_tx = txs[0] if txs else None
+        for tx in txs:
+            if (tx.get("thesis") or "").strip():
+                target_tx = tx
+                break
+        if not target_tx:
+            QMessageBox.information(self, "Journal", "No transactions found for this stock.")
+            return
+
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"Edit Journal Note - {note_row['symbol']}")
-        dialog.resize(680, 420)
+        dialog.setWindowTitle(f"Journal Note - {row['symbol']}")
+        dialog.resize(640, 360)
         self._apply_active_theme(dialog)
         root = QVBoxLayout(dialog)
+
         editor = QTextEdit()
-        editor.setPlainText(note_row.get("thesis") or "")
+        editor.setPlainText((target_tx.get("thesis") or "").strip())
         root.addWidget(editor)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         root.addWidget(buttons)
-        if dialog.exec_() == QDialog.Accepted:
-            updated = editor.toPlainText().strip()
-            self.db.update_transaction(transaction_id, thesis=updated)
-            if self.current_user_id:
-                self._render_journal_notes(self.current_user_id)
 
-    def set_range(self, range_key: str):
-        """Set range.
+        if dialog.exec_() != QDialog.Accepted:
+            return
 
-        Args:
-            range_key: Input parameter.
-
-        Returns:
-            Any: Method output for caller use.
-        """
-        self.current_range = range_key
-        self._update_range_buttons()
+        self.db.update_transaction(target_tx["transaction_id"], thesis=editor.toPlainText().strip())
         if self.current_user_id:
-            series_all = self.db.get_portfolio_performance_series(user_id=self.current_user_id)
-            self._render_trend(series_all)
+            self.load_dashboard(self.current_user_id, use_live_quotes=False)
 
-    def _update_range_buttons(self):
-        """Update range buttons.
-
-        Args:
-            None.
-
-        Returns:
-            Any: Method output for caller use.
-        """
-        selected = {"daily": self.daily_btn, "weekly": self.weekly_btn, "all_time": self.all_time_btn}
-        for key, btn in selected.items():
-            btn.setEnabled(key != self.current_range)
-
-    @staticmethod
-    def _set_card(card: QFrame, value: float, pct: float):
-        """Set card.
-
-        Args:
-            card: Input parameter.
-            value: Input parameter.
-            pct: Input parameter.
-
-        Returns:
-            Any: Method output for caller use.
-        """
-        color = "#2E7D32" if value >= 0 else "#C62828"
-        card._value.setText(f"₹{value:,.2f}")
-        card._value.setStyleSheet(f"color: {color};")
-        card._sub.setText(f"{pct:+.2f}%")
-        card._sub.setStyleSheet(f"color: {color};")
+    def add_transaction(self):
+        if not self.current_user_id:
+            return
+        dialog = AddStockDialog(self.db, self.stock_service, self.current_user_id, parent=self)
+        if dialog.exec_():
+            self.load_dashboard(self.current_user_id, use_live_quotes=False)
 
     def _apply_depth_effects(self):
-        """Apply depth effects.
-
-        Args:
-            None.
-
-        Returns:
-            Any: Method output for caller use.
-        """
         cfg = self._panel_shadow_preset()
-        for panel in (self.chart_panel, self.holdings_panel, self.notes_panel):
+        for panel in (self.chart_panel, self.snapshot_panel, self.portfolio_panel):
             effect = QGraphicsDropShadowEffect()
             effect.setBlurRadius(cfg["blur"])
             effect.setOffset(0, cfg["offset"])
@@ -585,14 +662,6 @@ class DashboardView(QWidget):
 
     @staticmethod
     def _panel_shadow_preset():
-        """Panel shadow preset.
-
-        Args:
-            None.
-
-        Returns:
-            Any: Method output for caller use.
-        """
         mapping = {
             "subtle": {"blur": 16, "offset": 3, "alpha": 75},
             "medium": {"blur": 26, "offset": 5, "alpha": 110},
@@ -601,14 +670,58 @@ class DashboardView(QWidget):
         return mapping.get(config.UI_GLOW_PRESET, mapping["medium"])
 
     def _apply_active_theme(self, widget: QWidget):
-        """Apply active theme.
-
-        Args:
-            widget: Input parameter.
-
-        Returns:
-            Any: Method output for caller use.
-        """
         win = self.window() if hasattr(self, "window") else None
         if win and hasattr(win, "styleSheet"):
             widget.setStyleSheet(win.styleSheet())
+
+    @staticmethod
+    def _date_sort_key(date_text: str) -> int:
+        raw = (date_text or "").strip()
+        if not raw or raw == "-":
+            return 0
+        try:
+            return int(datetime.strptime(raw, "%Y-%m-%d").strftime("%Y%m%d"))
+        except Exception:
+            return 0
+
+    def _render_industry_allocation(self, rows: list):
+        allocations = {}
+        for row in rows:
+            bucket = (row.get("industry") or "Unknown").strip() or "Unknown"
+            allocations[bucket] = allocations.get(bucket, 0.0) + float(row.get("investment") or 0.0)
+
+        self.industry_donut.set_allocations(allocations)
+
+        while self.industry_legend_layout.count():
+            item = self.industry_legend_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+        total = float(sum(allocations.values()))
+        if total <= 0:
+            label = QLabel("No industry allocation")
+            label.setObjectName("sectorLegend")
+            self.industry_legend_layout.addWidget(label)
+            self.industry_legend_layout.addStretch()
+            return
+
+        for idx, (name, value) in enumerate(sorted(allocations.items(), key=lambda x: x[1], reverse=True)[:6]):
+            pct = (value / total) * 100.0
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
+            dot = QLabel()
+            color = DonutAllocationWidget._colors[idx % len(DonutAllocationWidget._colors)]
+            dot.setFixedSize(9, 9)
+            dot.setStyleSheet(
+                f"background: {color.name()}; border-radius: 4px; border: 1px solid rgba(255,255,255,0.2);"
+            )
+            txt = QLabel(f"{name}  {pct:.1f}%")
+            txt.setObjectName("sectorLegend")
+            row_layout.addWidget(dot)
+            row_layout.addWidget(txt)
+            row_layout.addStretch()
+            self.industry_legend_layout.addWidget(row_widget)
+        self.industry_legend_layout.addStretch()
