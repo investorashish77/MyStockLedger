@@ -610,6 +610,7 @@ class DashboardView(QWidget):
         self._portfolio_helper.open_sell_dialog(row["stock_id"], row["symbol"], int(row.get("qty") or 0))
         if self.current_user_id:
             self.load_dashboard(self.current_user_id, use_live_quotes=False)
+            self._refresh_main_account_section()
 
     def _edit_note_for_row(self, row: dict):
         txs = self.db.get_stock_transactions(row["stock_id"]) or []
@@ -650,6 +651,18 @@ class DashboardView(QWidget):
         dialog = AddStockDialog(self.db, self.stock_service, self.current_user_id, parent=self)
         if dialog.exec_():
             self.load_dashboard(self.current_user_id, use_live_quotes=False)
+            self._refresh_main_account_section()
+
+    def _refresh_main_account_section(self):
+        """Refresh account snapshot shown in main window sidebar after portfolio mutations."""
+        main_win = self.window()
+        if not main_win:
+            return
+        if hasattr(main_win, "_refresh_sidebar_cash_summary"):
+            try:
+                main_win._refresh_sidebar_cash_summary(self.current_user_id)
+            except Exception:
+                pass
 
     def _apply_depth_effects(self):
         cfg = self._panel_shadow_preset()

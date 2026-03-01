@@ -500,7 +500,9 @@ class DatabaseManager:
                     raise ValueError("Unable to resolve user for stock transaction.")
                 self._bootstrap_cash_ledger_for_user(conn, user_id)
                 if tx_type == "BUY":
-                    available_cash = self._cash_balance_for_user(conn, user_id)
+                    # Validate against the same capital model shown in sidebar:
+                    # available = Deposit - Deployed.
+                    available_cash = self._capital_available_for_user_conn(conn, user_id)
                     if available_cash + 1e-9 < trade_amount:
                         shortfall = trade_amount - available_cash
                         raise ValueError(
@@ -508,6 +510,13 @@ class DatabaseManager:
                             f"Available: ₹{available_cash:,.2f}, Required: ₹{trade_amount:,.2f}, "
                             f"Shortfall: ₹{shortfall:,.2f}"
                         )
+                    # Keep ledger synchronized so BUY_DEBIT does not drive it negative.
+                    self._sync_ledger_balance_for_buy_conn(
+                        conn=conn,
+                        user_id=user_id,
+                        trade_amount=trade_amount,
+                        entry_date=transaction_date,
+                    )
 
             if tx_type == "SELL" and (realized_pnl is None or realized_cost_basis is None):
                 realized_pnl, realized_cost_basis, lot_matches = self._compute_fifo_realized_for_sell(
@@ -1012,6 +1021,13 @@ class DatabaseManager:
         '''Update a transaction with new values'''
         conn = self.get_connection()
         cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+
+        user_id = self._get_user_id_for_transaction(conn, int(transaction_id))
+        if user_id is None:
+            conn.rollback()
+            self._close_connection(conn)
+            return False
         
         # Build UPDATE query dynamically based on provided fields
         valid_fields = [
@@ -1028,12 +1044,18 @@ class DatabaseManager:
                 values.append(value)
         
         if not update_fields:
+            conn.rollback()
+            self._close_connection(conn)
             return False
         
         query = f"UPDATE transactions SET {', '.join(update_fields)} WHERE transaction_id = ?"
         values.append(transaction_id)
         
         cursor.execute(query, values)
+
+        # Keep ledger in sync for every transaction mutation.
+        self._reconcile_user_cash_ledger_conn(conn, int(user_id))
+
         conn.commit()
         self._close_connection(conn)
         
@@ -1043,9 +1065,23 @@ class DatabaseManager:
         '''Delete a transaction'''
         conn = self.get_connection()
         cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+
+        user_id = self._get_user_id_for_transaction(conn, int(transaction_id))
+        if user_id is None:
+            conn.rollback()
+            self._close_connection(conn)
+            return False
+
+        cursor.execute(
+            "DELETE FROM transaction_lot_matches WHERE sell_transaction_id = ? OR buy_transaction_id = ?",
+            (int(transaction_id), int(transaction_id)),
+        )
         
         cursor.execute("DELETE FROM transactions WHERE transaction_id = ?", 
                     (transaction_id,))
+
+        self._reconcile_user_cash_ledger_conn(conn, int(user_id))
         
         conn.commit()
         self._close_connection(conn)
@@ -1056,6 +1092,22 @@ class DatabaseManager:
         """Delete a stock and all related records."""
         conn = self.get_connection()
         cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+
+        user_id = self._get_user_id_for_stock(conn, int(stock_id))
+        if user_id is None:
+            conn.rollback()
+            self._close_connection(conn)
+            return False
+
+        cursor.execute(
+            """
+            DELETE FROM transaction_lot_matches
+            WHERE sell_transaction_id IN (SELECT transaction_id FROM transactions WHERE stock_id = ?)
+               OR buy_transaction_id IN (SELECT transaction_id FROM transactions WHERE stock_id = ?)
+            """,
+            (int(stock_id), int(stock_id)),
+        )
 
         cursor.execute("DELETE FROM ai_summaries WHERE alert_id IN (SELECT alert_id FROM alerts WHERE stock_id = ?)", (stock_id,))
         cursor.execute("DELETE FROM alerts WHERE stock_id = ?", (stock_id,))
@@ -1063,11 +1115,107 @@ class DatabaseManager:
         cursor.execute("DELETE FROM price_history WHERE stock_id = ?", (stock_id,))
         cursor.execute("DELETE FROM stocks WHERE stock_id = ?", (stock_id,))
 
+        self._reconcile_user_cash_ledger_conn(conn, int(user_id))
+
         conn.commit()
         self._close_connection(conn)
         return True
 
     # Cash ledger operations
+    @staticmethod
+    def _capital_setting_key(user_id: int) -> str:
+        """Return app-setting key used for user editable deposit capital."""
+        return f"user:{int(user_id)}:capital_deposit"
+
+    def _get_or_init_capital_deposit_for_user_conn(self, conn, user_id: int) -> float:
+        """
+        Read user deposit capital from app_settings, initializing default on first use.
+
+        This must stay aligned with UI sidebar semantics:
+        Deposit = editable user capital baseline.
+        """
+        key = self._capital_setting_key(int(user_id))
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM app_settings WHERE key = ? LIMIT 1", (key,))
+        row = cursor.fetchone()
+        if row and row[0] is not None:
+            try:
+                return float(row[0])
+            except Exception:
+                pass
+
+        default_deposit = float(config.LEDGER_INITIAL_CREDIT or 0.0)
+        cursor.execute(
+            """
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (key, f"{default_deposit:.2f}"),
+        )
+        return default_deposit
+
+    def _deployed_capital_for_user_conn(self, conn, user_id: int) -> float:
+        """
+        Compute deployed capital from current open holdings.
+
+        Mirrors UI logic based on portfolio summary:
+        deployed = SUM(current_quantity * avg_buy_price)
+        """
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COALESCE(SUM(h.total_quantity * h.avg_price), 0)
+            FROM (
+                SELECT
+                    SUM(CASE WHEN t.transaction_type = 'BUY' THEN t.quantity ELSE -t.quantity END) AS total_quantity,
+                    SUM(CASE WHEN t.transaction_type = 'BUY' THEN t.quantity * t.price_per_share ELSE 0 END) /
+                        NULLIF(SUM(CASE WHEN t.transaction_type = 'BUY' THEN t.quantity ELSE 0 END), 0) AS avg_price
+                FROM stocks s
+                LEFT JOIN transactions t ON s.stock_id = t.stock_id
+                WHERE s.user_id = ?
+                GROUP BY s.stock_id
+                HAVING total_quantity > 0
+            ) h
+            """,
+            (int(user_id),),
+        )
+        row = cursor.fetchone()
+        return float((row[0] if row else 0.0) or 0.0)
+
+    def _capital_available_for_user_conn(self, conn, user_id: int) -> float:
+        """
+        Return available capital aligned with UI sidebar model.
+
+        available = user_deposit - deployed_open_holdings
+        """
+        deposit = self._get_or_init_capital_deposit_for_user_conn(conn, int(user_id))
+        deployed = self._deployed_capital_for_user_conn(conn, int(user_id))
+        return float(deposit - deployed)
+
+    def _sync_ledger_balance_for_buy_conn(self, conn, user_id: int, trade_amount: float, entry_date: Optional[str] = None) -> None:
+        """
+        Ensure ledger has enough balance for BUY_DEBIT after capital-model validation.
+
+        This keeps cash_ledger non-negative and consistent when user-edited capital
+        deposit is higher than historical ledger cash.
+        """
+        available = self._cash_balance_for_user(conn, int(user_id))
+        needed = float(trade_amount or 0.0) - float(available or 0.0)
+        if needed <= 1e-9:
+            return
+        self._add_cash_ledger_entry_conn(
+            conn=conn,
+            user_id=int(user_id),
+            entry_type="DEPOSIT",
+            amount=float(needed),
+            entry_date=(entry_date or datetime.now().date().isoformat()),
+            note="Auto-sync ledger to capital deposit model",
+            enforce_balance=False,
+        )
+
     @staticmethod
     def _cash_ledger_sign(entry_type: str) -> int:
         """Return +/- sign for cash ledger entry type."""
@@ -1082,6 +1230,24 @@ class DatabaseManager:
         """Resolve owner user_id for a stock."""
         cursor = conn.cursor()
         cursor.execute("SELECT user_id FROM stocks WHERE stock_id = ? LIMIT 1", (stock_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return int(row[0])
+
+    def _get_user_id_for_transaction(self, conn, transaction_id: int) -> Optional[int]:
+        """Resolve owner user_id for a transaction."""
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT s.user_id
+            FROM transactions t
+            JOIN stocks s ON s.stock_id = t.stock_id
+            WHERE t.transaction_id = ?
+            LIMIT 1
+            """,
+            (int(transaction_id),),
+        )
         row = cursor.fetchone()
         if not row:
             return None
@@ -1106,6 +1272,65 @@ class DatabaseManager:
         )
         row = cursor.fetchone()
         return float(row[0] or 0.0)
+
+    def _rebuild_internal_ledger_entries_conn(self, conn, user_id: int) -> None:
+        """
+        Rebuild BUY_DEBIT/SELL_CREDIT entries from current transactions for one user.
+
+        External cash entries (INIT_DEPOSIT/DEPOSIT/WITHDRAWAL) are preserved.
+        """
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM cash_ledger WHERE user_id = ? AND entry_type IN ('BUY_DEBIT', 'SELL_CREDIT')",
+            (int(user_id),),
+        )
+        cursor.execute(
+            """
+            SELECT t.transaction_id, t.transaction_type, t.quantity, t.price_per_share, t.transaction_date
+            FROM transactions t
+            JOIN stocks s ON s.stock_id = t.stock_id
+            WHERE s.user_id = ?
+            ORDER BY t.transaction_date ASC, t.transaction_id ASC
+            """,
+            (int(user_id),),
+        )
+        rows = cursor.fetchall()
+        for tx_id, tx_type, qty, price, tx_date in rows:
+            tx_upper = (tx_type or "").strip().upper()
+            if tx_upper not in {"BUY", "SELL"}:
+                continue
+            amount = float((qty or 0) * (price or 0.0))
+            if amount <= 0:
+                continue
+            self._add_cash_ledger_entry_conn(
+                conn=conn,
+                user_id=int(user_id),
+                entry_type="BUY_DEBIT" if tx_upper == "BUY" else "SELL_CREDIT",
+                amount=amount,
+                entry_date=(tx_date or datetime.now().date().isoformat()),
+                note="Rebuilt from transactions",
+                reference_transaction_id=int(tx_id),
+                enforce_balance=False,
+            )
+
+    def _reconcile_user_cash_ledger_conn(self, conn, user_id: int) -> None:
+        """Reconcile a user's ledger to current transaction state."""
+        self._bootstrap_cash_ledger_for_user(conn, int(user_id))
+        self._rebuild_internal_ledger_entries_conn(conn, int(user_id))
+
+    def reconcile_user_cash_ledger(self, user_id: int) -> None:
+        """Public entry point to reconcile ledger for one user."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        try:
+            self._reconcile_user_cash_ledger_conn(conn, int(user_id))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._close_connection(conn)
 
     def _add_cash_ledger_entry_conn(
         self,
@@ -1365,6 +1590,37 @@ class DatabaseManager:
             "total_sell_credit": total_sell_credit,
             "available_cash": available,
             "consumed_cash": consumed,
+        }
+
+    def get_user_capital_snapshot(self, user_id: int) -> Dict:
+        """
+        Return sidebar capital snapshot from source-of-truth model.
+
+        Model:
+        - deposit: user editable capital baseline (`app_settings`)
+        - deployed: current open-holdings buy value
+        - available: deposit - deployed
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        try:
+            self._bootstrap_cash_ledger_for_user(conn, int(user_id))
+            deposit = self._get_or_init_capital_deposit_for_user_conn(conn, int(user_id))
+            deployed = self._deployed_capital_for_user_conn(conn, int(user_id))
+            available = float(deposit - deployed)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._close_connection(conn)
+
+        return {
+            "user_id": int(user_id),
+            "deposit": float(deposit),
+            "deployed": float(deployed),
+            "available": float(available),
         }
 
     def get_cash_balance_as_of(self, user_id: int, as_of_date: str) -> float:

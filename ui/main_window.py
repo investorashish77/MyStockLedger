@@ -802,10 +802,10 @@ class MainWindow(QMainWindow):
         if uid <= 0:
             return
         try:
-            deposit = self._get_user_deposit_capital(uid)
-            portfolio = self.db.get_portfolio_summary(uid)
-            deployed = sum(float(row.get("quantity") or 0.0) * float(row.get("avg_price") or 0.0) for row in portfolio)
-            available = deposit - deployed
+            snapshot = self.db.get_user_capital_snapshot(uid)
+            deposit = float(snapshot.get("deposit") or 0.0)
+            deployed = float(snapshot.get("deployed") or 0.0)
+            available = float(snapshot.get("available") or 0.0)
             self.sidebar_total_deposit.setText(f"Deposit: ₹{deposit:,.2f}")
             self.sidebar_deployed.setText(f"Deployed: ₹{deployed:,.2f}")
             self.sidebar_available.setText(f"Available: ₹{available:,.2f}")

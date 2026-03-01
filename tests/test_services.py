@@ -688,7 +688,7 @@ class TestDatabaseManager(unittest.TestCase):
 
         top_up = max(0.0, required_amount - base_credit)
         if top_up > 0:
-            self.db.add_cash_deposit(user_id, top_up, note="Seed")
+            self.db.set_setting(f"user:{user_id}:capital_deposit", f"{required_amount:.2f}")
         tx_id = self.db.add_transaction(
             stock_id=stock_id,
             transaction_type="BUY",
@@ -729,6 +729,101 @@ class TestDatabaseManager(unittest.TestCase):
         summary = self.db.get_cash_ledger_summary(user_id)
         expected = before - 1000.0 + 480.0
         self.assertAlmostEqual(summary["available_cash"], expected, places=2)
+
+    def test_buy_uses_capital_snapshot_not_legacy_ledger_balance(self):
+        """
+        BUY validation should use Deposit-Deployed (sidebar model), not legacy ledger available.
+        """
+        user_id = self.db.create_user("9000000033", "Capital Model User", "hash")
+        stock_id = self.db.add_stock(user_id, "CAPCHK", "Capital Check Ltd", "NSE")
+
+        # Seed one buy so deployed capital exists.
+        self.db.add_transaction(
+            stock_id=stock_id,
+            transaction_type="BUY",
+            quantity=10,
+            price_per_share=1000.0,  # deployed = 10,000
+            transaction_date="2026-01-01",
+            investment_horizon="LONG",
+            use_cash_ledger=True,
+        )
+
+        # Force legacy ledger available to a tiny number.
+        ledger_before = self.db.get_cash_ledger_summary(user_id)["available_cash"]
+        withdraw_amount = max(0.0, ledger_before - 100.0)
+        if withdraw_amount > 0:
+            self.db.add_cash_withdrawal(user_id, withdraw_amount, note="Lower ledger for regression test")
+
+        # Keep capital deposit high enough so Deposit - Deployed can fund the buy.
+        self.db.set_setting(f"user:{user_id}:capital_deposit", "100000.00")
+
+        # trade_amount = 50 * 100 = 5,000. Capital available is ~90,000.
+        tx_id = self.db.add_transaction(
+            stock_id=stock_id,
+            transaction_type="BUY",
+            quantity=50,
+            price_per_share=100.0,
+            transaction_date="2026-01-05",
+            investment_horizon="LONG",
+            use_cash_ledger=True,
+        )
+        self.assertIsNotNone(tx_id)
+
+    def test_delete_transaction_reconciles_ledger_internal_entries(self):
+        """Deleting a transaction should rebuild BUY/SELL ledger entries for user."""
+        user_id = self.db.create_user("9000000034", "Ledger Reconcile User", "hash")
+        stock_id = self.db.add_stock(user_id, "RECON", "Reconcile Ltd", "NSE")
+        base_credit = float(config.LEDGER_INITIAL_CREDIT or 0.0)
+
+        tx1 = self.db.add_transaction(
+            stock_id=stock_id,
+            transaction_type="BUY",
+            quantity=10,
+            price_per_share=100.0,
+            transaction_date="2026-01-01",
+            investment_horizon="LONG",
+            use_cash_ledger=True,
+        )
+        tx2 = self.db.add_transaction(
+            stock_id=stock_id,
+            transaction_type="BUY",
+            quantity=5,
+            price_per_share=200.0,
+            transaction_date="2026-01-02",
+            investment_horizon="LONG",
+            use_cash_ledger=True,
+        )
+        self.assertIsNotNone(tx1)
+        self.assertIsNotNone(tx2)
+
+        summary_before = self.db.get_cash_ledger_summary(user_id)
+        self.assertAlmostEqual(summary_before["available_cash"], base_credit - 2000.0, places=2)
+
+        deleted = self.db.delete_transaction(tx2)
+        self.assertTrue(deleted)
+
+        summary_after = self.db.get_cash_ledger_summary(user_id)
+        self.assertAlmostEqual(summary_after["available_cash"], base_credit - 1000.0, places=2)
+
+    def test_user_capital_snapshot_matches_deposit_minus_deployed(self):
+        """Capital snapshot should expose Deposit / Deployed / Available consistently."""
+        user_id = self.db.create_user("9000000035", "Capital Snapshot User", "hash")
+        stock_id = self.db.add_stock(user_id, "SNAP", "Snapshot Ltd", "NSE")
+        self.db.set_setting(f"user:{user_id}:capital_deposit", "250000.00")
+        self.db.add_transaction(
+            stock_id=stock_id,
+            transaction_type="BUY",
+            quantity=20,
+            price_per_share=500.0,
+            transaction_date="2026-01-01",
+            investment_horizon="LONG",
+            use_cash_ledger=True,
+        )
+
+        snapshot = self.db.get_user_capital_snapshot(user_id)
+        self.assertAlmostEqual(snapshot["deposit"], 250000.0, places=2)
+        self.assertAlmostEqual(snapshot["deployed"], 10000.0, places=2)
+        self.assertAlmostEqual(snapshot["available"], 240000.0, places=2)
 
     def test_analyst_consensus_upsert_and_get(self):
         """Test analyst consensus upsert and get.

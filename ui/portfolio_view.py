@@ -294,6 +294,7 @@ class PortfolioView(QWidget):
         if dialog.exec_():
             # Reload portfolio
             self.load_portfolio(self.current_user_id)
+            self._notify_account_state_changed()
     
     def view_stock_details(self, index):
         """Open transaction manager when row is double-clicked."""
@@ -506,6 +507,7 @@ class PortfolioView(QWidget):
         if dialog.exec_():
             # Reload portfolio
             self.load_portfolio(self.current_user_id)
+            self._notify_account_state_changed()
             parent_dialog.accept()
 
     def delete_transaction(self, transaction_id, parent_dialog):
@@ -523,6 +525,7 @@ class PortfolioView(QWidget):
                 QMessageBox.information(self, "Success", 
                                     "Transaction deleted successfully!")
                 self.load_portfolio(self.current_user_id)
+                self._notify_account_state_changed()
                 parent_dialog.accept()
             else:
                 QMessageBox.critical(self, "Error", 
@@ -545,6 +548,7 @@ class PortfolioView(QWidget):
             if self.db.delete_stock(stock_id):
                 QMessageBox.information(self, "Success", f"{symbol} deleted from portfolio.")
                 self.load_portfolio(self.current_user_id)
+                self._notify_account_state_changed()
             else:
                 QMessageBox.critical(self, "Error", "Failed to delete stock position.")
 
@@ -619,7 +623,19 @@ class PortfolioView(QWidget):
                 f"Available Cash: ₹{available_cash:,.2f}",
             )
             self.load_portfolio(self.current_user_id)
+            self._notify_account_state_changed()
         except ValueError as exc:
             QMessageBox.warning(self, "Sell Validation", str(exc))
         except Exception as exc:
             QMessageBox.critical(self, "Sell Failed", f"Unable to record sell transaction.\n{exc}")
+
+    def _notify_account_state_changed(self):
+        """Refresh main-window account snapshot after transaction mutations."""
+        main_win = self.window()
+        if not main_win:
+            return
+        if hasattr(main_win, "_refresh_sidebar_cash_summary"):
+            try:
+                main_win._refresh_sidebar_cash_summary(self.current_user_id)
+            except Exception:
+                pass

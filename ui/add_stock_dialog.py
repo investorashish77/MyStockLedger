@@ -359,8 +359,8 @@ class AddStockDialog(QDialog):
             message = str(e)
             if transaction_type == "BUY" and "Insufficient available cash" in message:
                 required = float(quantity) * float(price)
-                summary = self.db.get_cash_ledger_summary(self.user_id)
-                available = float(summary.get("available_cash") or 0.0)
+                snapshot = self.db.get_user_capital_snapshot(self.user_id)
+                available = float(snapshot.get("available") or 0.0)
                 needed = max(0.0, required - available)
                 reply = QMessageBox.question(
                     self,
