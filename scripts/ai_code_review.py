@@ -10,10 +10,11 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import requests
 
@@ -26,6 +27,8 @@ from utils.config import config
 
 DEFAULT_TEST_CMD = "PYTHONPYCACHEPREFIX=.pycache_local python3 tests/test_services.py"
 MAX_DIFF_CHARS_DEFAULT = 50000
+SEVERITY_LEVELS = ("critical", "high", "medium", "low")
+FAIL_ON_SEVERITY_CHOICES = ("none", "critical", "high", "medium", "low")
 
 
 def _run_cmd(cmd: str) -> Tuple[int, str, str]:
@@ -106,13 +109,58 @@ def _build_prompt(changed_files: str, diff_text: str) -> str:
         "3) Suggested Fix Plan\n"
         "If no findings, say: 'No material findings.'\n"
         "For each finding include:\n"
-        "- Severity\n"
+        "- Severity: <Critical|High|Medium|Low>\n"
         "- File path\n"
         "- Why it matters\n"
         "- Minimal fix suggestion\n\n"
         f"Changed files:\n{changed_files}\n\n"
         f"Patch:\n```diff\n{diff_text}\n```\n"
     )
+
+
+def _extract_severity_counts(review_text: str) -> Dict[str, int]:
+    """Extract finding counts by severity from AI review markdown."""
+    counts = {level: 0 for level in SEVERITY_LEVELS}
+    text = (review_text or "").strip()
+    if not text:
+        return counts
+
+    strict_hits = re.findall(
+        r"(?im)^\s*(?:[-*]\s*)?severity\s*[:\-]\s*(critical|high|medium|low)\b",
+        text,
+    )
+    if strict_hits:
+        for sev in strict_hits:
+            counts[sev.lower()] += 1
+        return counts
+
+    # Fallback for compact bullets like: "- High: <message>"
+    fallback_hits = re.findall(
+        r"(?im)^\s*(?:[-*]\s*)?(critical|high|medium|low)\s*[:\-|]",
+        text,
+    )
+    for sev in fallback_hits:
+        counts[sev.lower()] += 1
+    return counts
+
+
+def _is_no_material_findings(review_text: str) -> bool:
+    """Detect explicit clean signal from AI review output."""
+    return "no material findings" in (review_text or "").strip().lower()
+
+
+def _should_fail_from_counts(severity_counts: Dict[str, int], fail_on_severity: str) -> bool:
+    """Return True if counts violate configured fail threshold."""
+    threshold = (fail_on_severity or "high").strip().lower()
+    if threshold == "none":
+        return False
+
+    rank = {level: idx for idx, level in enumerate(SEVERITY_LEVELS)}
+    cutoff = rank.get(threshold, rank["high"])
+    for level, idx in rank.items():
+        if idx <= cutoff and int(severity_counts.get(level, 0)) > 0:
+            return True
+    return False
 
 
 def _call_ollama(prompt: str, model: str, timeout_sec: int) -> str:
@@ -177,6 +225,17 @@ def main() -> int:
     parser.add_argument("--run-tests", default=DEFAULT_TEST_CMD, help="Command to run tests before review")
     parser.add_argument("--max-diff-chars", type=int, default=MAX_DIFF_CHARS_DEFAULT)
     parser.add_argument(
+        "--fail-on-severity",
+        default="high",
+        choices=list(FAIL_ON_SEVERITY_CHOICES),
+        help="Fail gate if findings at/above this severity exist (default: high)",
+    )
+    parser.add_argument(
+        "--allow-indeterminate-pass",
+        action="store_true",
+        help="Allow pass when review output has neither severity-tagged findings nor 'No material findings.'",
+    )
+    parser.add_argument(
         "--include-working-tree",
         action="store_true",
         default=True,
@@ -193,6 +252,7 @@ def main() -> int:
         help="Do not fail the command when AI provider call fails (diagnostic mode).",
     )
     parser.add_argument("--output", default="", help="Optional explicit output markdown path")
+    parser.add_argument("--json-output", default="", help="Optional explicit output json path")
     args = parser.parse_args()
 
     provider = _resolve_provider(args.provider)
@@ -241,29 +301,86 @@ def main() -> int:
         review_failed = True
         review_text = f"AI review call failed: {exc}"
 
+    severity_counts = _extract_severity_counts(review_text)
+    severity_total = int(sum(severity_counts.values()))
+    no_material_findings = _is_no_material_findings(review_text)
+    indeterminate_review = (not review_failed) and (severity_total == 0) and (not no_material_findings)
+
+    gate_reason = "clean"
+    gate_failed = False
+    if review_failed:
+        if args.allow_review_failure:
+            gate_reason = "review_failed_allowed"
+            gate_failed = False
+        else:
+            gate_reason = "review_failed"
+            gate_failed = True
+    elif _should_fail_from_counts(severity_counts, args.fail_on_severity):
+        gate_reason = f"findings_at_or_above_{args.fail_on_severity}"
+        gate_failed = True
+    elif indeterminate_review and not args.allow_indeterminate_pass:
+        gate_reason = "indeterminate_review_output"
+        gate_failed = True
+    elif indeterminate_review:
+        gate_reason = "indeterminate_allowed"
+
     ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = Path(args.output) if args.output else Path("logs") / f"ai_code_review_{ts}.md"
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    json_output_path = Path(args.json_output) if args.json_output else output_path.with_suffix(".json")
 
+    review_gate_passed = bool(tests_ok and not gate_failed)
     header = (
         f"# AI Code Review Report\n\n"
         f"- Timestamp: {dt.datetime.now().isoformat(timespec='seconds')}\n"
         f"- Provider: {provider}\n"
         f"- Base Ref: {args.base}\n"
-        f"- Tests Passed: {'Yes' if tests_ok else 'No'}\n\n"
+        f"- Tests Passed: {'Yes' if tests_ok else 'No'}\n"
+        f"- Fail Threshold: {args.fail_on_severity}\n"
+        f"- Review Gate Passed: {'Yes' if review_gate_passed else 'No'}\n"
+        f"- Gate Reason: {gate_reason}\n\n"
+        f"## Gate Summary\n\n"
+        f"- Critical findings: {severity_counts['critical']}\n"
+        f"- High findings: {severity_counts['high']}\n"
+        f"- Medium findings: {severity_counts['medium']}\n"
+        f"- Low findings: {severity_counts['low']}\n"
+        f"- No material findings signal: {'Yes' if no_material_findings else 'No'}\n"
+        f"- Indeterminate review format: {'Yes' if indeterminate_review else 'No'}\n\n"
         f"## Test Output (latest)\n\n"
         f"```text\n{test_output}\n```\n\n"
         f"## AI Review Findings\n\n"
     )
     output_path.write_text(f"{header}{review_text}\n", encoding="utf-8")
 
+    json_output = {
+        "timestamp": dt.datetime.now().isoformat(timespec="seconds"),
+        "provider": provider,
+        "base_ref": args.base,
+        "include_working_tree": include_worktree,
+        "tests_passed": bool(tests_ok),
+        "review_failed": bool(review_failed),
+        "allow_review_failure": bool(args.allow_review_failure),
+        "fail_on_severity": args.fail_on_severity,
+        "severity_counts": severity_counts,
+        "no_material_findings": bool(no_material_findings),
+        "indeterminate_review": bool(indeterminate_review),
+        "review_gate_passed": bool(review_gate_passed),
+        "gate_reason": gate_reason,
+        "markdown_report_path": str(output_path),
+    }
+    json_output_path.write_text(json.dumps(json_output, indent=2), encoding="utf-8")
+
     print(f"Review report written: {output_path}")
+    print(f"Review summary written: {json_output_path}")
     if not tests_ok:
         print("Tests failed. Fix tests before merge.")
         return 1
     if review_failed and not args.allow_review_failure:
         print("AI review failed. Resolve provider connectivity/config or rerun with --allow-review-failure.")
         return 2
+    if gate_failed:
+        print(f"Review gate failed ({gate_reason}). Address findings and rerun.")
+        return 3
     return 0
 
 

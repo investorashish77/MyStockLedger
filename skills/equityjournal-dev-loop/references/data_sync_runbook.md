@@ -25,6 +25,12 @@ Step 2:
 python3 scripts/sync_bse_announcements_from_csv.py --input-dir announcements
 ```
 
+Useful options:
+```bash
+python3 scripts/sync_bse_announcements_from_csv.py --input-dir announcements --from-date 20260219 --to-date 20260225
+python3 scripts/sync_bse_announcements_from_csv.py --input-dir announcements --from-date 20260219 --to-date 20260225 --force
+```
+
 ## Announcements Direct API Fallback
 
 Script:

@@ -18,15 +18,32 @@ python3 tests/run_tests.py --integration
 
 Run local AI review:
 ```bash
-python scripts/ai_code_review.py --base main
+python3 scripts/ai_code_review.py --base main --fail-on-severity high
 ```
 
 Provider override examples:
 ```bash
-python scripts/ai_code_review.py --base main --provider ollama
-python scripts/ai_code_review.py --base main --provider groq
-python scripts/ai_code_review.py --base main --provider openai
+python3 scripts/ai_code_review.py --base main --provider ollama --fail-on-severity high
+python3 scripts/ai_code_review.py --base main --provider groq --fail-on-severity high
+python3 scripts/ai_code_review.py --base main --provider openai --fail-on-severity high
 ```
+
+Exit codes:
+- `0`: tests pass and review gate passes
+- `1`: tests failed
+- `2`: AI provider review failed (without allow flag)
+- `3`: review findings violate threshold (or output is indeterminate)
+
+Outputs:
+- Markdown report: `logs/ai_code_review_YYYYMMDD_HHMMSS.md`
+- JSON summary: `logs/ai_code_review_YYYYMMDD_HHMMSS.json`
+
+Local push enforcement (recommended):
+```bash
+./scripts/install_git_hooks.sh
+```
+
+This enables `.githooks/pre-push` to run tests + AI review gate before each push.
 
 Reference:
 - `DesignDocuments/AI_CODE_REVIEW_LOOP.md`

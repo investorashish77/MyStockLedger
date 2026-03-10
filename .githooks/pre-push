@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "${REPO_ROOT}"
+
+BASE_REF="${REVIEW_BASE_REF:-main}"
+PROVIDER="${AI_REVIEW_PROVIDER:-auto}"
+FAIL_ON_SEVERITY="${AI_REVIEW_FAIL_ON_SEVERITY:-high}"
+TEST_CMD="${AI_REVIEW_TEST_CMD:-PYTHONPYCACHEPREFIX=.pycache_local python3 tests/test_services.py}"
+
+echo "[review-gate] Running test + AI review gate before push..."
+echo "[review-gate] base=${BASE_REF} provider=${PROVIDER} fail_on_severity=${FAIL_ON_SEVERITY}"
+
+PYTHONPYCACHEPREFIX=.pycache_local python3 scripts/ai_code_review.py \
+  --base "${BASE_REF}" \
+  --provider "${PROVIDER}" \
+  --fail-on-severity "${FAIL_ON_SEVERITY}" \
+  --run-tests "${TEST_CMD}"
+
+echo "[review-gate] Gate passed. Continuing push."

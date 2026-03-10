@@ -234,17 +234,16 @@ class DashboardView(QWidget):
         split.setSpacing(12)
         root.addLayout(split)
 
-        self.chart_panel = SectionPanel()
+        self.chart_panel = SectionPanel("PORTFOLIO VALUE")
         self.chart_panel.setObjectName("dashPanel")
         split.addWidget(self.chart_panel, 3)
+        if getattr(self.chart_panel, "_title_label", None):
+            self.chart_panel._title_label.setObjectName("portfolioValueTitle")
 
         value_header = QHBoxLayout()
         value_meta = QVBoxLayout()
-        self.portfolio_value_title = QLabel("PORTFOLIO VALUE")
-        self.portfolio_value_title.setObjectName("portfolioValueTitle")
         self.portfolio_value_label = QLabel("₹0.00")
         self.portfolio_value_label.setObjectName("portfolioValueAmount")
-        value_meta.addWidget(self.portfolio_value_title)
         value_meta.addWidget(self.portfolio_value_label)
         value_header.addLayout(value_meta)
         value_header.addStretch()
@@ -338,10 +337,12 @@ class DashboardView(QWidget):
         header = self.portfolio_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Interactive)
         for idx in (3, 4, 5, 6, 8, 9, 10, 11):
             header.setSectionResizeMode(idx, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(7, QHeaderView.Stretch)
+        header.setSectionResizeMode(7, QHeaderView.Fixed)
+        self.portfolio_table.setColumnWidth(2, 130)
+        self.portfolio_table.setColumnWidth(7, 130)
         self.portfolio_table.verticalHeader().setDefaultSectionSize(46)
         self.portfolio_table.verticalHeader().setVisible(False)
         self.portfolio_table.setAlternatingRowColors(True)
@@ -518,7 +519,8 @@ class DashboardView(QWidget):
             investment_item.setData(SortableTableWidgetItem.SORT_ROLE, float(row["investment"]))
             self.portfolio_table.setItem(idx, 6, investment_item)
 
-            weight_item = SortableTableWidgetItem(f"{row['weight']:.2f}%")
+            # Keep sortable numeric item, but render text/bar only via cell widget.
+            weight_item = SortableTableWidgetItem("")
             weight_item.setData(SortableTableWidgetItem.SORT_ROLE, float(row["weight"]))
             self.portfolio_table.setItem(idx, 7, weight_item)
             self.portfolio_table.setCellWidget(idx, 7, self._build_weight_cell(row["weight"]))

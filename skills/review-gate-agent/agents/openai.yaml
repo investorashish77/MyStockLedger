@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Gate Agent"
+  short_description: "Iterative test + AI review quality gate"
+  default_prompt: "Use $review-gate-agent to run tests, fix review findings, and loop until the gate is clean."

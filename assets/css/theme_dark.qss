@@ -123,6 +123,31 @@ QToolButton#accountEditBtn:pressed {
     color: #50C7FF;
 }
 
+QToolButton#kpiInfoButton {
+    border: 1px solid rgba(96, 165, 250, 0.45);
+    border-radius: 9px;
+    background: rgba(30, 58, 138, 0.30);
+    color: #93C5FD;
+    min-width: 16px;
+    max-width: 16px;
+    min-height: 16px;
+    max-height: 16px;
+    padding: 0px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+QToolButton#kpiInfoButton:hover {
+    background: rgba(59, 130, 246, 0.34);
+    color: #E2ECFF;
+    border: 1px solid rgba(147, 197, 253, 0.65);
+}
+
+QToolButton#kpiInfoButton:pressed {
+    background: rgba(37, 99, 235, 0.45);
+    color: #FFFFFF;
+}
+
 QPushButton#navBtn {
     text-align: left;
     padding: 12px 14px;
@@ -509,29 +534,26 @@ QLabel#investedLabel {
 }
 
 QLabel#returnBadgePositive {
-    background: rgba(16, 185, 129, 0.18);
-    border: 1px solid rgba(16, 185, 129, 0.36);
     color: #34D399;
-    border-radius: 8px;
-    padding: 4px 10px;
+    background: transparent;
+    border: none;
+    padding: 0;
     font-weight: 700;
 }
 
 QLabel#returnBadgeNegative {
-    background: rgba(244, 63, 94, 0.16);
-    border: 1px solid rgba(244, 63, 94, 0.34);
     color: #F87171;
-    border-radius: 8px;
-    padding: 4px 10px;
+    background: transparent;
+    border: none;
+    padding: 0;
     font-weight: 700;
 }
 
 QLabel#returnBadgeNeutral {
-    background: rgba(59, 130, 246, 0.14);
-    border: 1px solid rgba(96, 165, 250, 0.30);
     color: #9CC8FF;
-    border-radius: 8px;
-    padding: 4px 10px;
+    background: transparent;
+    border: none;
+    padding: 0;
     font-weight: 700;
 }
 
@@ -615,4 +637,21 @@ QLabel#weightPctLabel {
     color: #AFC1D4;
     font-size: 11px;
     font-weight: 600;
+}
+
+QFrame#weightBarWrap {
+    background: transparent;
+}
+
+QProgressBar#weightBar {
+    background: #0E1825;
+    border: 1px solid rgba(116, 142, 179, 0.28);
+    border-radius: 4px;
+    min-height: 8px;
+    max-height: 8px;
+}
+
+QProgressBar#weightBar::chunk {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1FCB8D, stop:1 #11B9FF);
+    border-radius: 4px;
 }

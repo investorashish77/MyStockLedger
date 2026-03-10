@@ -120,7 +120,14 @@ class MainWindow(QMainWindow):
         kpi_row = QHBoxLayout(self.kpi_strip)
         kpi_row.setContentsMargins(10, 8, 10, 8)
         kpi_row.setSpacing(10)
-        self.global_daily_kpi = self._build_kpi_card("Daily Gain/Loss")
+        self.global_daily_kpi = self._build_kpi_card(
+            "Daily Gain/Loss",
+            title_tooltip=(
+                "Daily Gain/Loss = Today's PF Value + Today's Sell Value - Yesterday's PF Value + "
+                "Buy PnL from buys made today (using latest close available).\n"
+                "This is a daily P&L convention, and differs from weekly gain calculation."
+            ),
+        )
         self.global_weekly_kpi = self._build_kpi_card("Weekly Gain/Loss")
         self.global_total_kpi = self._build_kpi_card("Total Returns")
         self.global_realized_kpi = self._build_kpi_card("Realized P/L (Current FY)")
@@ -164,11 +171,12 @@ class MainWindow(QMainWindow):
         self._apply_depth_effects()
 
     @staticmethod
-    def _build_kpi_card(title: str) -> QFrame:
+    def _build_kpi_card(title: str, title_tooltip: str = None) -> QFrame:
         """Build kpi card.
 
         Args:
             title: Input parameter.
+            title_tooltip: Optional tooltip text for title row.
 
         Returns:
             Any: Method output for caller use.
@@ -176,11 +184,23 @@ class MainWindow(QMainWindow):
         card = QFrame()
         card.setObjectName("kpiCard")
         layout = QVBoxLayout()
+        title_row = QHBoxLayout()
         title_lbl = QLabel(title)
         title_lbl.setObjectName("kpiTitle")
+        title_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        title_row.addWidget(title_lbl, 1)
+        if title_tooltip:
+            info_btn = QToolButton()
+            info_btn.setText("i")
+            info_btn.setObjectName("kpiInfoButton")
+            info_btn.setToolTip(title_tooltip)
+            info_btn.setAutoRaise(True)
+            info_btn.setCursor(Qt.PointingHandCursor)
+            info_btn.setFocusPolicy(Qt.NoFocus)
+            title_row.addWidget(info_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
+        layout.addLayout(title_row)
         value_lbl = QLabel("₹0.00")
         value_lbl.setObjectName("kpiValue")
-        layout.addWidget(title_lbl)
         layout.addWidget(value_lbl)
         card.setLayout(layout)
         card._value = value_lbl
@@ -729,7 +749,7 @@ class MainWindow(QMainWindow):
         weekly_start = (period_end_dt - timedelta(days=7)).isoformat()
         period_end = period_end_dt.isoformat()
 
-        total_daily, daily_pct = self._compute_period_gain(
+        total_daily, daily_pct = self._compute_daily_gain(
             user_id=user_id,
             series=series_all,
             end_holdings_value=end_holdings_value,
@@ -787,6 +807,41 @@ class MainWindow(QMainWindow):
         net_contribution = self.db.get_portfolio_net_transaction_cash_flow(user_id, start_date, end_date)
         gain_value = end_value - start_value - float(net_contribution)
         denominator = start_value + float(net_contribution)
+        gain_pct = (gain_value / denominator * 100.0) if abs(denominator) > 1e-9 else 0.0
+        return gain_value, gain_pct
+
+    def _compute_daily_gain(
+        self,
+        user_id: int,
+        series: list,
+        end_holdings_value: float,
+        start_date: str,
+        end_date: str
+    ) -> tuple:
+        """
+        Compute daily gain using:
+            gain = v_end + sells - v_start + gain_loss_on_new_buys
+
+        where:
+            v_end, v_start = portfolio value at end and start dates
+            sells = sum(SELL quantity * price_per_share) in window
+            gain_loss_on_new_buys = Σ qty * (close_price - buy_price) for BUYs in window
+        """
+        start_value = float(self.db.get_portfolio_value_as_of(user_id, start_date))
+        end_value = float(self.db.get_portfolio_value_as_of(user_id, end_date))
+
+        if end_value <= 0 and float(end_holdings_value or 0.0) > 0:
+            end_value = float(end_holdings_value)
+
+        if start_value <= 0:
+            start_value = float(self._series_value_on_or_before(series, start_date))
+
+        sell_value = self.db.get_portfolio_transaction_value(user_id, start_date, end_date, "SELL")
+        buy_value = self.db.get_portfolio_transaction_value(user_id, start_date, end_date, "BUY")
+        buy_gain = self.db.get_portfolio_new_buy_mark_to_market_pnl(user_id, start_date, end_date)
+
+        gain_value = end_value + float(sell_value) - start_value + float(buy_gain)
+        denominator = start_value + float(buy_value)
         gain_pct = (gain_value / denominator * 100.0) if abs(denominator) > 1e-9 else 0.0
         return gain_value, gain_pct
 

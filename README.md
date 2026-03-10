@@ -37,7 +37,8 @@ A desktop application for tracking equity investments with AI-powered analysis.
 ## AI Review Workflow
 - Iteration board: `ENHANCED_FEATURES_DESIGN.md` (Section 11)
 - AI code review loop: `DesignDocuments/AI_CODE_REVIEW_LOOP.md`
-- Local review script: `python scripts/ai_code_review.py --base main`
+- Local review gate: `python3 scripts/ai_code_review.py --base main --fail-on-severity high`
+- Enforce per-push locally: `./scripts/install_git_hooks.sh`
 
 ## Prompt Tuning
 - Editable AI prompts file: `prompts/ai_prompt_templates.md`
@@ -70,6 +71,8 @@ A desktop application for tracking equity investments with AI-powered analysis.
   - `skills/equityjournal-dev-loop/references/quality_runbook.md`
 - Additional skill:
   - `skills/calculate-gains-loss` (timeframe gain/loss formula + contract template)
+  - `skills/review-gate-agent` (iterative test/review/fix gate to clean handoff)
+  - Invoke with: `$review-gate-agent`
 
 ## Data Sync Runbook (Bhavcopy + Announcements)
 
@@ -107,9 +110,18 @@ Step 2:
 python3 scripts/sync_bse_announcements_from_csv.py --input-dir announcements
 ```
 
+Incremental behavior:
+- By default, only new/changed CSV files are synced (unchanged files are skipped).
+- Use `--force` to reprocess selected files.
+- Use date filters to sync only a subset of snapshot files:
+```bash
+python3 scripts/sync_bse_announcements_from_csv.py --input-dir announcements --from-date 20260219 --to-date 20260225
+python3 scripts/sync_bse_announcements_from_csv.py --input-dir announcements --from-date 20260219 --to-date 20260225 --force
+```
+
 Expected output:
 - Per-file read/upsert attempts
-- Final summary: `Completed CSV sync. files=<n>, read_rows=<n>, upsert_attempts=<n>`
+- Final summary: `Completed CSV sync. files=<n>, read_rows=<n>, upsert_attempts=<n>, range_skipped=<n>, synced_skipped=<n>`
 
 ### BSE Announcements (direct API mode fallback)
 - Script: `scripts/sync_bse_announcements.py`

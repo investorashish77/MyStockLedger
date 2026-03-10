@@ -7,7 +7,12 @@ import argparse
 import csv
 import os
 import sys
+import re
+from datetime import datetime
 from pathlib import Path
+
+FILE_DATE_PATTERN = re.compile(r"(\d{8})(?=\.csv$)")
+SYNC_KEY_PREFIX = "bse_csv_sync_sig"
 
 
 def _clean(value):
@@ -41,6 +46,38 @@ def _resolve_symbol_id(db, scrip_code):
     return row["symbol_id"] if row else None
 
 
+def _parse_yyyymmdd(raw_value, arg_name):
+    """Parse YYYYMMDD argument value into date."""
+    if not raw_value:
+        return None
+    try:
+        return datetime.strptime(raw_value, "%Y%m%d").date()
+    except ValueError as exc:
+        raise ValueError(f"{arg_name} must be in YYYYMMDD format, got: {raw_value}") from exc
+
+
+def _extract_file_date(file_name):
+    """Extract YYYYMMDD date from CSV file name."""
+    match = FILE_DATE_PATTERN.search(file_name)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def _file_signature(file_path):
+    """Build lightweight file signature (size + mtime)."""
+    stat = file_path.stat()
+    return f"{stat.st_size}:{stat.st_mtime_ns}"
+
+
+def _sync_key(input_dir, file_path):
+    """Build deterministic app_settings key for file sync state."""
+    return f"{SYNC_KEY_PREFIX}::{str(input_dir.resolve())}::{file_path.name}"
+
+
 def main():
     """Main.
 
@@ -54,7 +91,24 @@ def main():
     parser.add_argument("--db-path", default="data/equity_tracker.db")
     parser.add_argument("--input-dir", default="announcements", help="Directory containing daily announcement CSV files")
     parser.add_argument("--pattern", default="bse_announcements_*.csv", help="CSV filename glob pattern")
+    parser.add_argument("--from-date", default="", help="Process files on/after YYYYMMDD (parsed from filename)")
+    parser.add_argument("--to-date", default="", help="Process files on/before YYYYMMDD (parsed from filename)")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Reprocess selected files even if unchanged and already synced before",
+    )
     args = parser.parse_args()
+
+    try:
+        from_date = _parse_yyyymmdd(args.from_date, "--from-date")
+        to_date = _parse_yyyymmdd(args.to_date, "--to-date")
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+    if from_date and to_date and from_date > to_date:
+        print(f"--from-date ({args.from_date}) cannot be after --to-date ({args.to_date})")
+        return 1
 
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     sys.path.insert(0, project_root)
@@ -79,11 +133,49 @@ def main():
         print(f"No CSV files found in {input_dir} matching {args.pattern}")
         return 1
 
+    selected_files = []
+    skipped_range = 0
+    skipped_synced = 0
+
+    for file_path in files:
+        file_date = _extract_file_date(file_path.name)
+        if from_date or to_date:
+            if file_date is None:
+                skipped_range += 1
+                logger.warning("Skipping %s: unable to infer YYYYMMDD from filename for date-range filter", file_path.name)
+                print(f"{file_path.name}: skipped (cannot infer YYYYMMDD filename date for range filter)")
+                continue
+            if from_date and file_date < from_date:
+                skipped_range += 1
+                continue
+            if to_date and file_date > to_date:
+                skipped_range += 1
+                continue
+
+        sync_key = _sync_key(input_dir, file_path)
+        file_sig = _file_signature(file_path)
+        if not args.force:
+            synced_sig = db.get_setting(sync_key)
+            if synced_sig == file_sig:
+                skipped_synced += 1
+                logger.info("%s: unchanged file already synced, skipping", file_path.name)
+                print(f"{file_path.name}: skipped (already synced, unchanged)")
+                continue
+
+        selected_files.append((file_path, sync_key, file_sig))
+
+    if not selected_files:
+        print(
+            "No files selected for sync after applying range/sync-state filters. "
+            f"(range_skipped={skipped_range}, synced_skipped={skipped_synced})"
+        )
+        return 0
+
     total_files = 0
     total_rows = 0
     total_written = 0
 
-    for file_path in files:
+    for file_path, sync_key, file_sig in selected_files:
         total_files += 1
         file_rows = 0
         file_written = 0
@@ -133,20 +225,24 @@ def main():
                 )
                 file_written += 1
 
+        db.set_setting(sync_key, file_sig)
         total_rows += file_rows
         total_written += file_written
         logger.info("%s: read=%s, upsert_attempts=%s", file_path.name, file_rows, file_written)
         print(f"{file_path.name}: read={file_rows}, upsert_attempts={file_written}")
 
     logger.info(
-        "Completed CSV sync. files=%s, read_rows=%s, upsert_attempts=%s",
+        "Completed CSV sync. files=%s, read_rows=%s, upsert_attempts=%s, range_skipped=%s, synced_skipped=%s",
         total_files,
         total_rows,
         total_written,
+        skipped_range,
+        skipped_synced,
     )
     print(
         f"Completed CSV sync. files={total_files}, read_rows={total_rows}, "
-        f"upsert_attempts={total_written}"
+        f"upsert_attempts={total_written}, range_skipped={skipped_range}, "
+        f"synced_skipped={skipped_synced}"
     )
     return 0
 

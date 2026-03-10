@@ -3432,3 +3432,112 @@ class DatabaseManager:
         row = cursor.fetchone()
         self._close_connection(conn)
         return float(row[0] or 0.0)
+
+    def get_portfolio_transaction_value(
+        self,
+        user_id: int,
+        start_date: str,
+        end_date: str,
+        transaction_type: str
+    ) -> float:
+        """
+        Sum transaction cash-flow value between two dates (inclusive) for one transaction type.
+
+        transaction_type can be BUY or SELL.
+        """
+        tx_type = (transaction_type or "").strip().upper()
+        if tx_type not in {"BUY", "SELL"} or not start_date or not end_date:
+            return 0.0
+
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COALESCE(SUM(t.quantity * t.price_per_share), 0)
+            FROM transactions t
+            JOIN stocks s ON t.stock_id = s.stock_id
+            WHERE s.user_id = ?
+              AND UPPER(t.transaction_type) = ?
+              AND t.transaction_date > ?
+              AND t.transaction_date <= ?
+            """,
+            (user_id, tx_type, start_date, end_date),
+        )
+        row = cursor.fetchone()
+        self._close_connection(conn)
+        return float(row[0] or 0.0)
+
+    def get_portfolio_new_buy_mark_to_market_pnl(
+        self,
+        user_id: int,
+        start_date: str,
+        end_date: str
+    ) -> float:
+        """
+        Compute unrealized gain/loss on buys in the range, marked to latest close <= end_date.
+
+        Formula per buy row:
+            quantity * (close_price - buy_price)
+        """
+        if not start_date or not end_date:
+            return 0.0
+
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT t.stock_id, t.quantity, t.price_per_share, sm.bse_code
+            FROM transactions t
+            JOIN stocks s ON t.stock_id = s.stock_id
+            LEFT JOIN symbol_master sm
+                ON sm.symbol = s.symbol
+               OR sm.symbol = REPLACE(REPLACE(UPPER(s.symbol), '.NS', ''), '.BO', '')
+            WHERE s.user_id = ?
+              AND UPPER(t.transaction_type) = 'BUY'
+              AND t.transaction_date > ?
+              AND t.transaction_date <= ?
+            """,
+            (user_id, start_date, end_date),
+        )
+
+        buy_pnl = 0.0
+        for stock_id, quantity, price_per_share, bse_code in cursor.fetchall():
+            qty = float(quantity or 0.0)
+            if qty <= 0:
+                continue
+
+            buy_price = float(price_per_share or 0.0)
+            close_price = None
+            code = (bse_code or "").strip()
+            if code:
+                cursor.execute(
+                    """
+                    SELECT close_price
+                    FROM bse_daily_prices
+                    WHERE bse_code = ?
+                      AND trade_date <= ?
+                    ORDER BY trade_date DESC
+                    LIMIT 1
+                    """,
+                    (code, end_date),
+                )
+                price_row = cursor.fetchone()
+                if price_row and price_row[0] is not None:
+                    close_price = float(price_row[0])
+
+            if close_price is None:
+                cursor.execute(
+                    "SELECT price FROM price_history WHERE stock_id = ? ORDER BY recorded_at DESC LIMIT 1",
+                    (stock_id,),
+                )
+                ph_row = cursor.fetchone()
+                if ph_row and ph_row[0] is not None:
+                    close_price = float(ph_row[0])
+
+            if close_price is None:
+                close_price = buy_price
+
+            buy_pnl += qty * (close_price - buy_price)
+
+        self._close_connection(conn)
+        return float(buy_pnl)

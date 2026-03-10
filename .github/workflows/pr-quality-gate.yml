@@ -14,6 +14,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -36,3 +38,19 @@ jobs:
       - name: Run service tests
         run: |
           PYTHONPYCACHEPREFIX=.pycache_local python tests/test_services.py
+
+      - name: Run AI review gate (must pass)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AI_REVIEW_PROVIDER: ${{ vars.AI_REVIEW_PROVIDER }}
+          AI_REVIEW_FAIL_ON_SEVERITY: ${{ vars.AI_REVIEW_FAIL_ON_SEVERITY }}
+        run: |
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "OPENAI_API_KEY secret is required for AI review gate." >&2
+            exit 1
+          fi
+          PYTHONPYCACHEPREFIX=.pycache_local python3 scripts/ai_code_review.py \
+            --base main \
+            --provider "${AI_REVIEW_PROVIDER:-openai}" \
+            --fail-on-severity "${AI_REVIEW_FAIL_ON_SEVERITY:-high}" \
+            --run-tests ""
